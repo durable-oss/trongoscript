@@ -1,0 +1,4 @@
+; main.trongo — composes a config from two included files.
+{:db      (include "db.trongo")
+ :cache   (include "cache.trongo")
+ :name    (upcase "production")}

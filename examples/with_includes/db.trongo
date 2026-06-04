@@ -1,0 +1,3 @@
+{:host "db.internal"
+ :port 5432
+ :pool 20}

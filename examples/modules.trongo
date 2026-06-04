@@ -1,0 +1,22 @@
+; Optional-modules demo. Run with:
+;   trongo eval -i modules.trongo --format yaml
+
+(use math collections finance predicates)
+
+(let [loan       200000        ; principal
+      apr        0.06          ; annual rate
+      years      30
+      monthly-r  (/ apr 12)
+      n          (* years 12)
+      payment    (pmt monthly-r n loan)
+      raw        [5 3 8 1 4 9 2 7 6]
+      sorted     (sort raw)]
+  {:loan        loan
+   :payment     (round payment 2)
+   :sqrt-2      (round (sqrt 2) 6)
+   :pi          (round (pi) 6)
+   :sorted      sorted
+   :sum-raw     (sum raw)
+   :avg-raw     (avg raw)
+   :odd-count   (count [(odd? 1) (odd? 2) (odd? 3) (odd? 4) (odd? 5)])
+   :within      (between? 7 1 10)})

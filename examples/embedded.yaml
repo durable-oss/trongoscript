@@ -1,0 +1,22 @@
+# A YAML config with embedded Trongoscript snippets, à la YAMLScript.
+# Run with: `trongo embed -i embedded.yaml`
+#
+# The idiomatic form uses YAML's native tag syntax: `!trongo <expr>`.
+# The quoted-string form (`"!trongo <expr>"`) and the single-key-map form
+# (`!trongo: <expr>`) are also recognized for JSON/TOML compatibility.
+
+app: trongoscript-demo
+
+# Tagged scalar — clean and YAML-idiomatic.
+title: !trongo (upcase "production environment")
+
+counts:
+  servers: !trongo (+ 3 4 5)
+  # Block scalar lets the expression span multiple lines if needed.
+  shards: !trongo |
+    (* 2 8)
+
+constants:
+  pi: 3.14159
+  list:
+    - !trongo (range 1 5)

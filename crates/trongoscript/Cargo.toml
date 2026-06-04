@@ -1,0 +1,24 @@
+[package]
+name = "trongoscript"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A YAMLScript-inspired DSL for producing nested data structures"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+trongoscript-parser = { path = "../trongoscript-parser" }
+trongoscript-stdlib = { path = "../trongoscript-stdlib" }
+inventory.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+toml.workspace = true

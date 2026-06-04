@@ -1,0 +1,15 @@
+[package]
+name = "trongoscript-parser"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Nom-based parser for Trongoscript"
+
+[dependencies]
+nom.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

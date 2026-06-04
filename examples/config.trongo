@@ -1,0 +1,16 @@
+; A configuration document built from a Trongoscript expression.
+; Top-level result is the value of the last form — here, a map.
+
+(def env "production")
+(def port (if (= env "production") 443 8080))
+
+{:app   "trongoscript-demo"
+ :env   env
+ :port  port
+ :hosts ["alpha.example.com"
+         "beta.example.com"
+         "gamma.example.com"]
+ :auth  {:enabled true
+         :scheme  "oauth2"
+         :scopes  ["read" "write"]}
+ :tags  (concat ["server"] ["edge"] ["live"])}

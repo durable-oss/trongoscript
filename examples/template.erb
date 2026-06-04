@@ -1,0 +1,7 @@
+<% (def name "Alice") %>
+<% (def items ["apples" "oranges" "pears"]) %>
+Hello, <%= name %>!
+You have <%= (count items) %> items in your cart:
+<%= (join items ", ") %>
+
+Total fruits: <%= (count items) %>

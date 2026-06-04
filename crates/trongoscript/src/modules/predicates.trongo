@@ -1,0 +1,19 @@
+; `predicates` module — implemented entirely in Trongoscript on top of
+; the core builtins. Loaded by `(use predicates)`.
+;
+; All forms below are macros, which re-expand at the call site. (Since
+; Trongoscript now has first-class functions, several of these could be
+; reworked as `defn` — kept as macros for backward compatibility and
+; zero-overhead expansion.)
+
+(defmacro inc       [x]       (+ x 1))
+(defmacro dec       [x]       (- x 1))
+(defmacro zero?     [x]       (= x 0))
+(defmacro pos?      [x]       (> x 0))
+(defmacro neg?      [x]       (< x 0))
+(defmacro even?     [x]       (= (mod x 2) 0))
+(defmacro odd?      [x]       (not (= (mod x 2) 0)))
+(defmacro between?  [x lo hi] (and (>= x lo) (<= x hi)))
+(defmacro non-nil?  [x]       (not (nil? x)))
+(defmacro coalesce  [a b]     (if (nil? a) b a))
+(defmacro default   [a b]     (if (nil? a) b a))
