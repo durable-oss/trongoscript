@@ -53,7 +53,7 @@ pub use embed::{
     evaluate_embedded_yaml_with, DEFAULT_KEY, DEFAULT_PREFIX, DEFAULT_TAG,
 };
 pub use error::{EvalError, EvalResult};
-pub use eval::{eval, eval_module, eval_source, value_to_expr, Closure, Context, EvalConfig, HostBuiltin, MacroDef};
+pub use eval::{eval, eval_module, eval_source, partial_eval, value_to_expr, Closure, Context, EvalConfig, HostBuiltin, MacroDef, Partial};
 pub use trongoscript_parser::{
     parse_expr, parse_expr_with, parse_module, parse_module_with, parse_template, Expr, Module,
     ParserOptions, ReaderMacroFn, ReaderMacroOutput, Template,
