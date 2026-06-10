@@ -85,7 +85,7 @@ pub struct MacroDef {
 /// not captured — they're read live from `scopes[0]` at call time, so
 /// `def`s installed after closure creation are visible (matching common
 /// Lisp/Scheme/Clojure semantics).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Closure {
     pub params: Vec<String>,
     pub rest_param: Option<String>,
@@ -126,7 +126,7 @@ pub struct Context {
     /// First-class function registry. A `(fn ...)` or `(defn ...)` form
     /// pushes a [`Closure`] here and returns a handle [`Value`] (see
     /// [`crate::value::make_fn_value`]) that indexes into this vec.
-    pub(crate) fns: Vec<Closure>,
+    pub fns: Vec<Closure>,
 }
 
 impl Context {
@@ -152,6 +152,34 @@ impl Context {
             self.scopes[0].insert(k, v);
         }
         self
+    }
+
+    /// Returns a reference to the global scope (scopes[0]).
+    pub fn globals(&self) -> &HashMap<String, Value> {
+        &self.scopes[0]
+    }
+
+    /// Returns a mutable reference to the global scope.
+    pub fn globals_mut(&mut self) -> &mut HashMap<String, Value> {
+        &mut self.scopes[0]
+    }
+
+    /// Rebuilds a Context from persisted globals and closures.
+    /// The sandbox, host_builtins, and config must be re-provided —
+    /// they are not serialized because they are host configuration, not state.
+    pub fn from_persisted(
+        globals: HashMap<String, Value>,
+        fns: Vec<Closure>,
+        enabled_modules: HashSet<String>,
+        rng_state: u64,
+        config: EvalConfig,
+    ) -> Self {
+        let mut ctx = Self::new(config);
+        ctx.scopes[0] = globals;
+        ctx.fns = fns;
+        ctx.enabled_modules = enabled_modules;
+        ctx.rng_state = rng_state;
+        ctx
     }
 
     fn push_scope(&mut self) {
@@ -291,6 +319,12 @@ fn eval_list(items: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
             "use" => return special_use(&items[1..], ctx),
             "fn" => return special_fn(&items[1..], ctx),
             "defn" => return special_defn(&items[1..], ctx),
+            "run-activity" | "run-subprocess" | "sleep-until" => {
+                return Err(EvalError::InvalidForm(format!(
+                    "`{}` is only valid inside a Gearwork workflow",
+                    name
+                )))
+            }
             _ => {}
         }
 
@@ -1210,7 +1244,7 @@ fn try_splice(
 /// is for symbols, which we'd need a tagged representation for. We treat
 /// the result as a *data literal expression*: numbers, bools, nil,
 /// strings, vectors, maps.
-pub(crate) fn value_to_expr(v: &Value) -> Expr {
+pub fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Null => Expr::Nil,
         Value::Bool(b) => Expr::Bool(*b),
