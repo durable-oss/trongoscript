@@ -170,30 +170,44 @@ fn opaque_form_no_args_suspends() {
 }
 
 #[test]
-fn opaque_args_not_evaluated() {
-    // Undefined symbol inside an opaque form must not cause an error.
+fn opaque_bound_arg_is_resolved() {
+    // A variable in an opaque form's args is resolved to its value when the form
+    // suspends, so the suspended payload carries the value, not the name. This is
+    // what lets a workflow thread a `let`-bound input into an activity call.
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr("(run-activity undefined-sym)").unwrap();
-    assert!(matches!(
-        partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])),
-        Ok(Partial::Suspended(_))
-    ));
+    ctx.bind("who", serde_json::json!("ada"));
+    let expr = trongoscript_parser::parse_expr("(run-activity :to who)").unwrap();
+    let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
+    if let Partial::Suspended(Expr::List(items)) = r {
+        assert_eq!(items[0], Expr::Symbol("run-activity".into()));
+        assert_eq!(items[1], Expr::Keyword("to".into()));
+        assert_eq!(items[2], Expr::String("ada".into()));
+    } else {
+        panic!("expected Suspended(List(...))");
+    }
 }
 
 #[test]
-fn opaque_form_preserves_original_expr() {
-    // The suspended payload must be the original unevaluated list — args untouched.
+fn opaque_undefined_arg_errors() {
+    // An argument referencing an undefined symbol is now an error — args are
+    // reduced, so a typo in an activity argument is caught rather than silently
+    // carried through as an unresolved name.
+    let mut ctx = pe_ctx();
+    let expr = trongoscript_parser::parse_expr("(run-activity undefined-sym)").unwrap();
+    assert!(partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).is_err());
+}
+
+#[test]
+fn opaque_form_folds_pure_args() {
+    // The suspended payload has its pure argument subexpressions folded to
+    // literals; the head and keyword labels are preserved.
     let mut ctx = pe_ctx();
     let expr = trongoscript_parser::parse_expr("(run-activity :task (+ 1 2))").unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("run-activity".into()));
         assert_eq!(items[1], Expr::Keyword("task".into()));
-        assert_eq!(items[2], Expr::List(vec![
-            Expr::Symbol("+".into()),
-            Expr::Number(1.0),
-            Expr::Number(2.0),
-        ]));
+        assert_eq!(items[2], Expr::Number(3.0));
     } else {
         panic!("expected Suspended(List(...))");
     }
@@ -506,15 +520,51 @@ fn def_with_opaque_rhs_errors() {
 }
 
 #[test]
-fn let_with_opaque_body_errors() {
-    // Same reasoning as def_with_opaque_rhs_errors: let's binding vector is
-    // not decomposable across a suspension boundary, so partial_eval delegates
-    // the whole form to eval, which errors on the opaque sub-form.
+fn let_with_opaque_body_suspends() {
+    // `let` is partially evaluated structurally: a pure binding is applied, and
+    // an opaque body suspends rather than erroring. This is what lets a durable
+    // workflow thread an activity result through a `let`.
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(let [a 1] (run-activity :work))"
-    ).unwrap();
-    assert!(partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).is_err());
+    let expr = trongoscript_parser::parse_expr("(let [a 1] (run-activity :work))").unwrap();
+    assert!(matches!(
+        partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap(),
+        Partial::Suspended(_)
+    ));
+}
+
+#[test]
+fn let_with_opaque_binding_suspends() {
+    // A binding whose value is opaque suspends the whole let — the body may use
+    // the unbound name, so it cannot proceed yet.
+    let mut ctx = pe_ctx();
+    let expr = trongoscript_parser::parse_expr("(let [a (run-activity :fetch)] a)").unwrap();
+    assert!(matches!(
+        partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap(),
+        Partial::Suspended(_)
+    ));
+}
+
+#[test]
+fn let_with_pure_body_reduces() {
+    // With no opaque forms, a let reduces fully, exactly as `eval` would.
+    let mut ctx = pe_ctx();
+    assert_eq!(done_num(pe("(let [a 2 b 3] (+ a b))", &mut ctx, &opaque(&[]))), 5.0);
+}
+
+#[test]
+fn do_with_opaque_form_suspends() {
+    let mut ctx = pe_ctx();
+    let expr = trongoscript_parser::parse_expr("(do 1 (run-activity :work) 3)").unwrap();
+    assert!(matches!(
+        partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap(),
+        Partial::Suspended(_)
+    ));
+}
+
+#[test]
+fn do_pure_reduces_to_last() {
+    let mut ctx = pe_ctx();
+    assert_eq!(done_num(pe("(do 1 2 3)", &mut ctx, &opaque(&[]))), 3.0);
 }
 
 // ---------------------------------------------------------------------------
