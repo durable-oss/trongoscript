@@ -723,7 +723,17 @@ fn special_defn(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
 /// Globals stay live (so the closure sees `def`s installed after its
 /// creation), while lexical frames are restored from the snapshot taken
 /// at `(fn ...)` time.
-pub(crate) fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
+/// Invoke a previously-registered closure by its handle index.
+///
+/// Most callers want [`call_fn`], which accepts the function-handle [`Value`]
+/// that `(fn ...)` / `(defn ...)` evaluate to. This lower-level form takes the
+/// raw `handle` index into [`Context::fns`].
+///
+/// # Errors
+///
+/// Returns [`EvalError::Arity`] if `args` does not match the closure's
+/// parameter list, or [`EvalError::InvalidForm`] if `handle` is out of range.
+pub fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
     let closure = ctx
         .fns
         .get(handle)
@@ -772,6 +782,33 @@ pub(crate) fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> 
     ctx.scopes.truncate(1);
     ctx.scopes.extend(saved_lexical);
     result
+}
+
+/// Invoke a first-class function value with the given arguments.
+///
+/// `f` must be a function-handle [`Value`] — the kind produced by evaluating a
+/// `(fn ...)` or `(defn ...)` form. Host code that captures such a value (for
+/// example a predicate passed into a host builtin) can call it back through
+/// this function.
+///
+/// # Errors
+///
+/// Returns [`EvalError::Type`] if `f` is not a function value, plus any error
+/// raised while running the closure body (including arity mismatch).
+///
+/// # Examples
+///
+/// ```
+/// use trongoscript::{eval_source, call_fn, Context, EvalConfig, Value};
+///
+/// let mut ctx = Context::new(EvalConfig::default());
+/// let f = eval_source("(fn [x] (* x x))", &mut ctx).unwrap();
+/// let r = call_fn(&mut ctx, &f, &[Value::from(6)]).unwrap();
+/// assert_eq!(r, Value::from(36));
+/// ```
+pub fn call_fn(ctx: &mut Context, f: &Value, args: &[Value]) -> EvalResult<Value> {
+    let handle = coerce_to_fn("call_fn", f)?;
+    call_closure(handle, args, ctx)
 }
 
 pub(crate) fn coerce_to_fn(fname: &str, v: &Value) -> EvalResult<usize> {
