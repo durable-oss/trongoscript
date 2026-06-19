@@ -72,6 +72,18 @@ fn nth(args: &[Value]) -> BuiltinResult {
     Ok(a[i as usize].clone())
 }
 
+fn list(args: &[Value]) -> BuiltinResult {
+    Ok(Value::Array(args.to_vec()))
+}
+
+fn cons(args: &[Value]) -> BuiltinResult {
+    let tail = expect_array("cons", &args[1])?;
+    let mut out = Vec::with_capacity(tail.len() + 1);
+    out.push(args[0].clone());
+    out.extend(tail.iter().cloned());
+    Ok(Value::Array(out))
+}
+
 fn conj(args: &[Value]) -> BuiltinResult {
     let a = expect_array("conj", &args[0])?;
     let mut out = a.clone();
@@ -240,6 +252,8 @@ inventory::submit! { Builtin::new("first",     1, 1, first) }
 inventory::submit! { Builtin::new("last",      1, 1, last) }
 inventory::submit! { Builtin::new("rest",      1, 1, rest) }
 inventory::submit! { Builtin::new("nth",       2, 2, nth) }
+inventory::submit! { Builtin::variadic("list", list) }
+inventory::submit! { Builtin::new("cons",      2, 2, cons) }
 inventory::submit! { Builtin::variadic("conj", conj) }
 inventory::submit! { Builtin::variadic("concat", concat) }
 inventory::submit! { Builtin::new("reverse",   1, 1, reverse) }

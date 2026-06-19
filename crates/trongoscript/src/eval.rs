@@ -312,6 +312,8 @@ fn eval_list(items: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
             "and" => return special_and(&items[1..], ctx),
             "or" => return special_or(&items[1..], ctx),
             "when" => return special_when(&items[1..], ctx),
+            "->" => return special_thread_first(&items[1..], ctx),
+            "->>" => return special_thread_last(&items[1..], ctx),
             "include" => return io_include(&items[1..], ctx),
             "read-file" => return io_read_file(&items[1..], ctx),
             "list-files" => return io_list_files(&items[1..], ctx),
@@ -537,6 +539,62 @@ fn special_when(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
         last = eval(e, ctx)?;
     }
     Ok(last)
+}
+
+/// Build the threaded form for one step of `->` / `->>`.
+///
+/// `acc` is the accumulated expression threaded so far. `form` is the next
+/// step. A bare symbol `f` becomes `(f acc)`; a call `(f a b)` becomes
+/// `(f acc a b)` for thread-first or `(f a b acc)` for thread-last.
+fn thread_step(acc: Expr, form: &Expr, last: bool) -> EvalResult<Expr> {
+    match form {
+        // Bare symbol or any non-list form: wrap as a single-arg call.
+        Expr::Symbol(_) => Ok(Expr::List(vec![form.clone(), acc])),
+        Expr::List(items) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len() + 1);
+            if last {
+                out.extend(items.iter().cloned());
+                out.push(acc);
+            } else {
+                out.push(items[0].clone());
+                out.push(acc);
+                out.extend(items[1..].iter().cloned());
+            }
+            Ok(Expr::List(out))
+        }
+        other => Err(EvalError::InvalidForm(format!(
+            "thread step must be a symbol or non-empty list, got {:?}",
+            other
+        ))),
+    }
+}
+
+/// Expand a `->` / `->>` form to its fully threaded expression (no eval).
+fn build_thread(args: &[Expr], last: bool) -> EvalResult<Expr> {
+    let Some((first, steps)) = args.split_first() else {
+        return Err(EvalError::Arity {
+            function: if last { "->>" } else { "->" }.into(),
+            expected: ">=1".into(),
+            actual: 0,
+        });
+    };
+    let mut acc = first.clone();
+    for step in steps {
+        acc = thread_step(acc, step, last)?;
+    }
+    Ok(acc)
+}
+
+/// `(-> x (f a) g ...)` — thread `x` as the first argument of each step.
+fn special_thread_first(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
+    let threaded = build_thread(args, false)?;
+    eval(&threaded, ctx)
+}
+
+/// `(->> x (f a) g ...)` — thread `x` as the last argument of each step.
+fn special_thread_last(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
+    let threaded = build_thread(args, true)?;
+    eval(&threaded, ctx)
 }
 
 /// `(let [n1 v1 n2 v2 ...] body...)`
@@ -1526,6 +1584,14 @@ fn partial_eval_list(
                 }
             }
             return Ok(Partial::Suspended(Expr::List(reduced)));
+        }
+
+        // `->` / `->>`: pure structural rewrites. Expand to the threaded
+        // form and partially evaluate that, so a threaded opaque activity
+        // result is handled like any other suspended sub-form.
+        if name == "->" || name == "->>" {
+            let threaded = build_thread(&items[1..], name == "->>")?;
+            return partial_eval(&threaded, ctx, opaque_forms);
         }
 
         // `if`: only reduce the live branch.
