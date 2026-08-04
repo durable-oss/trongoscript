@@ -918,6 +918,14 @@ impl<'a> Drop for IncludeGuard<'a> {
     }
 }
 
+/// Re-exports of this module's private, allocation-free helpers so the Kani
+/// harnesses in `crate::verification` can reach them without widening the
+/// public API. Compiled only under `cargo kani`.
+#[cfg(kani)]
+pub(crate) mod verification_shims {
+    pub(crate) use super::{glob_match, match_class, virtual_strip_prefix};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

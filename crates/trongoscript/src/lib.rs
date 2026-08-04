@@ -59,6 +59,11 @@ pub mod sandbox;
 pub mod template;
 pub mod value;
 
+/// Kani proof harnesses for the sandbox's pure path/glob helpers. Empty
+/// outside `cargo kani`.
+#[cfg(kani)]
+mod verification;
+
 pub use embed::{
     evaluate_embedded, evaluate_embedded_with, evaluate_embedded_yaml,
     evaluate_embedded_yaml_with, DEFAULT_KEY, DEFAULT_PREFIX, DEFAULT_TAG,
