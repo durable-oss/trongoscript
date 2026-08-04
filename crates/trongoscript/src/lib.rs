@@ -19,9 +19,20 @@
 //! Trongoscript has *no* ambient capabilities. The interpreter cannot open
 //! network connections, run subprocesses, or touch the filesystem unless
 //! the embedder hands it a [`Sandbox`] rooted at a specific directory. The
-//! sandbox limits paths to its subtree, refuses absolute paths, declines
-//! to follow symlinks during directory listings, and enforces per-file
-//! size and recursion limits. See [`sandbox`] for details.
+//! sandbox presents scripts with a virtual filesystem, limits paths to the
+//! host directories explicitly mounted into it, declines to follow symlinks
+//! during directory listings, and enforces per-file size and recursion
+//! limits. Reading and listing are the only operations available: there is
+//! no write path. See [`sandbox`] for details.
+//!
+//! Additional host directories can be grafted in beside the root:
+//!
+//! ```no_run
+//! use trongoscript::Sandbox;
+//! // /x -> ./bob/x, and /tom/y -> ./tom/y
+//! let sb = Sandbox::new("./bob")?.mount("/tom", "./tom")?;
+//! # Ok::<(), trongoscript::SandboxError>(())
+//! ```
 //!
 //! Hosts may also register additional functions via [`EvalConfig::with_host_builtin`].
 //!
@@ -59,7 +70,7 @@ pub use trongoscript_parser::{
     ParserOptions, ReaderMacroFn, ReaderMacroOutput, Template,
 };
 pub use trongoscript_stdlib::{Builtin, BuiltinError, BuiltinResult, Value};
-pub use sandbox::{Sandbox, SandboxError, SandboxLimits};
+pub use sandbox::{Mount, Sandbox, SandboxError, SandboxLimits};
 pub use template::{render, render_template};
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

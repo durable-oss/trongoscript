@@ -74,12 +74,103 @@ fn include_blocked_outside_root() {
 }
 
 #[test]
-fn include_absolute_path_rejected() {
+fn include_absolute_path_cannot_reach_host_root() {
     let root = examples_dir().join("with_includes");
     let sb = Sandbox::new(&root).unwrap();
     let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+    // `/etc/passwd` is absolute in *sandbox* space: it means
+    // `<root>/etc/passwd`, which doesn't exist. The host's real
+    // /etc/passwd does exist, so a leak would succeed rather than fail.
     let r = eval_source(r#"(include "/etc/passwd")"#, &mut ctx);
     assert!(r.is_err());
+
+    // Read the host file directly to be sure the failure above isn't just
+    // this machine lacking /etc/passwd.
+    if let Ok(host) = std::fs::read_to_string("/etc/passwd") {
+        let mut ctx = Context::new(
+            EvalConfig::default().with_sandbox(Sandbox::new(&root).unwrap()),
+        );
+        let v = eval_source(r#"(read-file "/etc/passwd")"#, &mut ctx);
+        match v {
+            Err(_) => {}
+            Ok(got) => panic!(
+                "sandbox leaked the host /etc/passwd (matches host: {})",
+                got == serde_json::Value::String(host)
+            ),
+        }
+    }
+}
+
+#[test]
+fn bind_mount_exposes_a_second_tree() {
+    // ./bob is the sandbox root; ./tom is mounted at /tom. Scripts reach
+    // ./bob/x as /x and ./tom/y as /tom/y.
+    let tmp = std::env::temp_dir().join(format!(
+        "trongo-mount-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(tmp.join("bob")).unwrap();
+    std::fs::create_dir_all(tmp.join("tom")).unwrap();
+    std::fs::write(tmp.join("bob/x"), "from-bob").unwrap();
+    std::fs::write(tmp.join("tom/y"), "from-tom").unwrap();
+    std::fs::write(tmp.join("tom/lib.trongo"), r#"{:who "tom"}"#).unwrap();
+
+    let sb = Sandbox::new(tmp.join("bob"))
+        .unwrap()
+        .mount("/tom", tmp.join("tom"))
+        .unwrap();
+    let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+
+    let v = eval_source(
+        r#"{:x (read-file "/x") :y (read-file "/tom/y") :lib (include "/tom/lib.trongo")}"#,
+        &mut ctx,
+    )
+    .expect("eval");
+    assert_eq!(v["x"], serde_json::Value::String("from-bob".into()));
+    assert_eq!(v["y"], serde_json::Value::String("from-tom".into()));
+    assert_eq!(v["lib"]["who"], serde_json::Value::String("tom".into()));
+
+    // A script in the root mount cannot climb sideways into ./tom on disk.
+    let r = eval_source(r#"(read-file "../tom/y")"#, &mut ctx);
+    assert!(matches!(r, Err(EvalError::Sandbox(_))), "got {:?}", r);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn include_inside_a_mount_stays_in_that_mount() {
+    let tmp = std::env::temp_dir().join(format!(
+        "trongo-mount-esc-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(tmp.join("bob")).unwrap();
+    std::fs::create_dir_all(tmp.join("tom")).unwrap();
+    std::fs::write(tmp.join("bob/secret.trongo"), r#"{:leaked true}"#).unwrap();
+    // A file in the mount that tries to relative-include out of it.
+    std::fs::write(
+        tmp.join("tom/evil.trongo"),
+        r#"(include "../bob/secret.trongo")"#,
+    )
+    .unwrap();
+
+    let sb = Sandbox::new(tmp.join("bob"))
+        .unwrap()
+        .mount("/tom", tmp.join("tom"))
+        .unwrap();
+    let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+
+    let r = eval_source(r#"(include "/tom/evil.trongo")"#, &mut ctx);
+    assert!(matches!(r, Err(EvalError::Sandbox(_))), "got {:?}", r);
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]

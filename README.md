@@ -50,6 +50,9 @@ trongo eval -i config.trongo --format yaml
 # Sandboxed I/O (include / read-file / list-files)
 trongo eval -i main.trongo --root ./scripts
 
+# Mount extra directories into the sandbox: ./bob/x is /x, ./tom/y is /tom/y
+trongo eval -i main.trongo --root ./bob --mount /tom=./tom
+
 # ERB-like template
 trongo render -i page.erb --root ./views
 
@@ -124,9 +127,12 @@ trongo reference
 (defmacro sum-of [& xs]      `(+ ~@xs))
 (macroexpand '(unless cond expr))  ; → (if cond nil expr)
 
-;; Sandboxed I/O — only available when the host configures a sandbox root
+;; Sandboxed I/O — only available when the host configures a sandbox root.
+;; Relative paths resolve against the current file's directory; absolute
+;; paths are absolute within the sandbox's virtual filesystem.
 (include    "path.trongo")
 (read-file  "data.txt")
+(read-file  "/tom/y")        ; from a directory mounted at /tom
 (list-files "subdir")
 ```
 
@@ -135,7 +141,8 @@ trongo reference
 ```rust
 use trongoscript::{eval_source, Context, EvalConfig, Sandbox, Value};
 
-let sb = Sandbox::new("./scripts")?;
+// Rooted at ./scripts, with ./shared grafted in at /shared.
+let sb = Sandbox::new("./scripts")?.mount("/shared", "./shared")?;
 let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
 
 let v: Value = eval_source(
@@ -162,8 +169,14 @@ let cfg = EvalConfig::default().with_host_builtin("hello", host);
 
 - Cannot open sockets, run subprocesses, or touch the filesystem unless the
   embedder passes a [`Sandbox`](crates/trongoscript/src/sandbox.rs).
-- Sandbox paths are canonicalized; symlinks that escape the root are refused.
-  Absolute paths are refused. `..` traversal outside the root is refused.
+- Reading and listing are the only filesystem operations that exist. There
+  is no write, delete, or execute builtin, so every mount is read-only.
+- Scripts see a *virtual* filesystem, not host paths. An absolute path like
+  `/etc/passwd` is absolute in sandbox-space and resolves inside the
+  sandbox; the host's `/` is unreachable.
+- Sandbox paths are canonicalized; symlinks that escape their mount are
+  refused, as is `..` traversal outside it. `..` never crosses a mount
+  boundary, so a script under `/tom` cannot climb into the root mount.
 - Per-file size, include depth, and listing-entry limits prevent
   pathological inputs.
 - Include cycles are detected and rejected.
