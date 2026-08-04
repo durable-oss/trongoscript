@@ -145,7 +145,7 @@ fn pred_holds(
     ctx: &mut Context,
     invert: bool,
 ) -> EvalResult<bool> {
-    let r = call_closure(handle, &[value.clone()], ctx)?;
+    let r = call_closure(handle, std::slice::from_ref(value), ctx)?;
     Ok(if invert { !is_truthy(&r) } else { is_truthy(&r) })
 }
 
@@ -174,7 +174,7 @@ fn mapc(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let handle = coerce_to_fn("mapc", &f)?;
     let items = coerce_to_list("mapc", &xs)?;
     for it in &items {
-        call_closure(handle, &[it.clone()], ctx)?;
+        call_closure(handle, std::slice::from_ref(it), ctx)?;
     }
     Ok(Value::Array(items))
 }

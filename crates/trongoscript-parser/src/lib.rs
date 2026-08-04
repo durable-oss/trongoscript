@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn parses_atoms() {
         assert_eq!(one("42"), Expr::Number(42.0));
-        assert_eq!(one("-3.14"), Expr::Number(-3.14));
+        assert_eq!(one("-3.25"), Expr::Number(-3.25));
         assert_eq!(one("nil"), Expr::Nil);
         assert_eq!(one("true"), Expr::Bool(true));
         assert_eq!(one("false"), Expr::Bool(false));

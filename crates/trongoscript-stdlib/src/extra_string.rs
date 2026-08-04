@@ -45,7 +45,7 @@ fn pad_with(args: &[Value], fname: &str, left: bool) -> BuiltinResult {
     if cur >= n {
         return Ok(Value::String(s.to_string()));
     }
-    let extra = std::iter::repeat(pad).take(n - cur).collect::<String>();
+    let extra = std::iter::repeat_n(pad, n - cur).collect::<String>();
     Ok(Value::String(if left {
         format!("{}{}", extra, s)
     } else {

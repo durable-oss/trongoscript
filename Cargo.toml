@@ -15,6 +15,11 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/durable-oss/trongoscript"
 description = "A YAMLScript-inspired DSL for producing nested data structures, written in Rust"
 
+# `kani` is set by `cargo kani`, which is not part of a normal build, so
+# rustc has no way to learn the name on its own.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [workspace.dependencies]
 # Parsing
 nom = "7.1"

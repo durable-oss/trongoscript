@@ -276,10 +276,8 @@ fn toml_from_json(v: serde_json::Value) -> Option<toml::Value> {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Some(toml::Value::Integer(i))
-            } else if let Some(f) = n.as_f64() {
-                Some(toml::Value::Float(f))
             } else {
-                None
+                n.as_f64().map(toml::Value::Float)
             }
         }
         serde_json::Value::String(s) => Some(toml::Value::String(s)),
@@ -309,10 +307,9 @@ fn guess_format_from_path(p: &std::path::Path) -> Option<Format> {
     }
 }
 
-fn print_help() {
-    print!(
-        "{}",
-        r#"Trongoscript — a Lisp-flavored DSL for nested data.
+/// The `--help` text. Kept as a raw string rather than a `print!` argument so
+/// the `{...}` map and spintax syntax below need no brace doubling.
+const HELP: &str = r#"Trongoscript — a Lisp-flavored DSL for nested data.
 
 Atoms:
   42  3.14  -7   true  false  nil
@@ -379,8 +376,10 @@ Examples:
   trongo render -i template.erb --root ./views
   trongo embed -i config.yaml --root .  # process !trongo snippets in YAML
   trongo eval --root ./bob --mount /tom=./tom -i main.trongo
-"#
-    );
+"#;
+
+fn print_help() {
+    print!("{HELP}");
 }
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
