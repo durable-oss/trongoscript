@@ -85,7 +85,7 @@ pub struct MacroDef {
 /// not captured — they're read live from `scopes[0]` at call time, so
 /// `def`s installed after closure creation are visible (matching common
 /// Lisp/Scheme/Clojure semantics).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Closure {
     pub params: Vec<String>,
     pub rest_param: Option<String>,
@@ -126,7 +126,7 @@ pub struct Context {
     /// First-class function registry. A `(fn ...)` or `(defn ...)` form
     /// pushes a [`Closure`] here and returns a handle [`Value`] (see
     /// [`crate::value::make_fn_value`]) that indexes into this vec.
-    pub(crate) fns: Vec<Closure>,
+    pub fns: Vec<Closure>,
 }
 
 impl Context {
@@ -152,6 +152,34 @@ impl Context {
             self.scopes[0].insert(k, v);
         }
         self
+    }
+
+    /// Returns a reference to the global scope (scopes[0]).
+    pub fn globals(&self) -> &HashMap<String, Value> {
+        &self.scopes[0]
+    }
+
+    /// Returns a mutable reference to the global scope.
+    pub fn globals_mut(&mut self) -> &mut HashMap<String, Value> {
+        &mut self.scopes[0]
+    }
+
+    /// Rebuilds a Context from persisted globals and closures.
+    /// The sandbox, host_builtins, and config must be re-provided —
+    /// they are not serialized because they are host configuration, not state.
+    pub fn from_persisted(
+        globals: HashMap<String, Value>,
+        fns: Vec<Closure>,
+        enabled_modules: HashSet<String>,
+        rng_state: u64,
+        config: EvalConfig,
+    ) -> Self {
+        let mut ctx = Self::new(config);
+        ctx.scopes[0] = globals;
+        ctx.fns = fns;
+        ctx.enabled_modules = enabled_modules;
+        ctx.rng_state = rng_state;
+        ctx
     }
 
     fn push_scope(&mut self) {
@@ -291,6 +319,12 @@ fn eval_list(items: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
             "use" => return special_use(&items[1..], ctx),
             "fn" => return special_fn(&items[1..], ctx),
             "defn" => return special_defn(&items[1..], ctx),
+            "run-activity" | "run-subprocess" | "sleep-until" => {
+                return Err(EvalError::InvalidForm(format!(
+                    "`{}` is only valid inside a Gearwork workflow",
+                    name
+                )))
+            }
             _ => {}
         }
 
@@ -689,7 +723,17 @@ fn special_defn(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
 /// Globals stay live (so the closure sees `def`s installed after its
 /// creation), while lexical frames are restored from the snapshot taken
 /// at `(fn ...)` time.
-pub(crate) fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
+/// Invoke a previously-registered closure by its handle index.
+///
+/// Most callers want [`call_fn`], which accepts the function-handle [`Value`]
+/// that `(fn ...)` / `(defn ...)` evaluate to. This lower-level form takes the
+/// raw `handle` index into [`Context::fns`].
+///
+/// # Errors
+///
+/// Returns [`EvalError::Arity`] if `args` does not match the closure's
+/// parameter list, or [`EvalError::InvalidForm`] if `handle` is out of range.
+pub fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
     let closure = ctx
         .fns
         .get(handle)
@@ -738,6 +782,33 @@ pub(crate) fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> 
     ctx.scopes.truncate(1);
     ctx.scopes.extend(saved_lexical);
     result
+}
+
+/// Invoke a first-class function value with the given arguments.
+///
+/// `f` must be a function-handle [`Value`] — the kind produced by evaluating a
+/// `(fn ...)` or `(defn ...)` form. Host code that captures such a value (for
+/// example a predicate passed into a host builtin) can call it back through
+/// this function.
+///
+/// # Errors
+///
+/// Returns [`EvalError::Type`] if `f` is not a function value, plus any error
+/// raised while running the closure body (including arity mismatch).
+///
+/// # Examples
+///
+/// ```
+/// use trongoscript::{eval_source, call_fn, Context, EvalConfig, Value};
+///
+/// let mut ctx = Context::new(EvalConfig::default());
+/// let f = eval_source("(fn [x] (* x x))", &mut ctx).unwrap();
+/// let r = call_fn(&mut ctx, &f, &[Value::from(6)]).unwrap();
+/// assert_eq!(r, Value::from(36));
+/// ```
+pub fn call_fn(ctx: &mut Context, f: &Value, args: &[Value]) -> EvalResult<Value> {
+    let handle = coerce_to_fn("call_fn", f)?;
+    call_closure(handle, args, ctx)
 }
 
 pub(crate) fn coerce_to_fn(fname: &str, v: &Value) -> EvalResult<usize> {
@@ -1210,7 +1281,7 @@ fn try_splice(
 /// is for symbols, which we'd need a tagged representation for. We treat
 /// the result as a *data literal expression*: numbers, bools, nil,
 /// strings, vectors, maps.
-pub(crate) fn value_to_expr(v: &Value) -> Expr {
+pub fn value_to_expr(v: &Value) -> Expr {
     match v {
         Value::Null => Expr::Nil,
         Value::Bool(b) => Expr::Bool(*b),
@@ -1365,160 +1436,424 @@ fn io_glob(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
 #[allow(dead_code)]
 fn _re_export_builtin_error(_: BuiltinError) {}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
+// ---------------------------------------------------------------------------
+// Partial evaluation (binding-time analysis)
+// ---------------------------------------------------------------------------
 
-    fn eval_str(src: &str) -> Value {
-        let mut ctx = Context::new(EvalConfig::default());
-        eval_source(src, &mut ctx).expect("eval failed")
-    }
+/// Result of partially evaluating an expression.
+///
+/// `Done` means the expression reduced to a value. `Suspended` means it
+/// contained at least one opaque form and cannot be fully reduced yet — the
+/// payload is the residual expression (pure subexpressions already folded).
+pub enum Partial {
+    Done(Value),
+    Suspended(Expr),
+}
 
-    #[test]
-    fn evaluates_literals() {
-        assert_eq!(eval_str("42"), Value::Number(42.into()));
-        assert_eq!(eval_str("\"hi\""), Value::String("hi".into()));
-        assert_eq!(eval_str("true"), Value::Bool(true));
-        assert_eq!(eval_str("nil"), Value::Null);
-        assert_eq!(eval_str(":foo"), Value::String("foo".into()));
-    }
+/// Partially evaluate `expr`, reducing all pure subexpressions eagerly while
+/// leaving forms whose head symbol appears in `opaque_forms` suspended.
+///
+/// Rules:
+/// - Atoms and forms with no opaque subexpressions reduce normally via `eval`.
+/// - A `List` whose head symbol is in `opaque_forms` returns
+///   `Suspended(expr.clone())` without evaluating arguments.
+/// - A `List` containing any suspended child returns `Suspended` with pure
+///   children already folded to their `value_to_expr` literals.
+/// - `if`: the condition is partially evaluated first. If it suspends, the
+///   whole `if` is `Suspended`. Otherwise only the live branch is reduced.
+/// - `Vector` and `Map` literals: each element is partially evaluated; if
+///   any suspends the whole literal is `Suspended` (with pure elements folded).
+pub fn partial_eval(
+    expr: &Expr,
+    ctx: &mut Context,
+    opaque_forms: &HashSet<String>,
+) -> EvalResult<Partial> {
+    match expr {
+        // Atoms and self-evaluating forms: reduce fully.
+        Expr::Nil | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Keyword(_) => {
+            eval(expr, ctx).map(Partial::Done)
+        }
 
-    #[test]
-    fn evaluates_arithmetic() {
-        assert_eq!(eval_str("(+ 1 2 3)"), Value::Number(6.into()));
-        assert_eq!(eval_str("(* 2 3 4)"), Value::Number(24.into()));
-        assert_eq!(eval_str("(- 10 3 2)"), Value::Number(5.into()));
-    }
+        // Symbol: resolve; if undefined this is an error, not a suspension.
+        Expr::Symbol(_) => eval(expr, ctx).map(Partial::Done),
 
-    #[test]
-    fn evaluates_map_with_keywords() {
-        let v = eval_str(r#"{:name "alice" :age 30}"#);
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj.get("name"), Some(&Value::String("alice".into())));
-        assert_eq!(obj.get("age"), Some(&Value::Number(30.into())));
-    }
+        // Vector literal: partially eval each element.
+        Expr::Vector(items) => {
+            let mut reduced: Vec<Expr> = Vec::with_capacity(items.len());
+            let mut any_suspended = false;
+            for item in items {
+                match partial_eval(item, ctx, opaque_forms)? {
+                    Partial::Done(v) => reduced.push(value_to_expr(&v)),
+                    Partial::Suspended(e) => {
+                        any_suspended = true;
+                        reduced.push(e);
+                    }
+                }
+            }
+            if any_suspended {
+                Ok(Partial::Suspended(Expr::Vector(reduced)))
+            } else {
+                // All done — evaluate the folded vector to get the Value.
+                eval(&Expr::Vector(reduced), ctx).map(Partial::Done)
+            }
+        }
 
-    #[test]
-    fn evaluates_let() {
-        let v = eval_str("(let [x 10 y 20] (+ x y))");
-        assert_eq!(v, Value::Number(30.into()));
-    }
+        // Map literal: partially eval each key and value.
+        Expr::Map(pairs) => {
+            let mut reduced: Vec<(Expr, Expr)> = Vec::with_capacity(pairs.len());
+            let mut any_suspended = false;
+            for (k, v) in pairs {
+                let rk = match partial_eval(k, ctx, opaque_forms)? {
+                    Partial::Done(val) => value_to_expr(&val),
+                    Partial::Suspended(e) => {
+                        any_suspended = true;
+                        e
+                    }
+                };
+                let rv = match partial_eval(v, ctx, opaque_forms)? {
+                    Partial::Done(val) => value_to_expr(&val),
+                    Partial::Suspended(e) => {
+                        any_suspended = true;
+                        e
+                    }
+                };
+                reduced.push((rk, rv));
+            }
+            if any_suspended {
+                Ok(Partial::Suspended(Expr::Map(reduced)))
+            } else {
+                eval(&Expr::Map(reduced), ctx).map(Partial::Done)
+            }
+        }
 
-    #[test]
-    fn evaluates_def_then_use() {
-        let v = eval_str("(def x 5) (* x x)");
-        assert_eq!(v, Value::Number(25.into()));
-    }
-
-    #[test]
-    fn if_truthy_branches() {
-        assert_eq!(eval_str("(if true 1 2)"), Value::Number(1.into()));
-        assert_eq!(eval_str("(if false 1 2)"), Value::Number(2.into()));
-        assert_eq!(eval_str("(if nil 1 2)"), Value::Number(2.into()));
-        assert_eq!(eval_str("(if 0 1 2)"), Value::Number(1.into())); // 0 is truthy
-    }
-
-    #[test]
-    fn nested_data() {
-        let v = eval_str(
-            r#"
-            {:name (upcase "alice")
-             :age (+ 20 10)
-             :tags ["a" "b" "c"]}
-            "#,
-        );
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj.get("name"), Some(&Value::String("ALICE".into())));
-        assert_eq!(obj.get("age"), Some(&Value::Number(30.into())));
-    }
-
-    #[test]
-    fn undefined_function() {
-        let mut ctx = Context::new(EvalConfig::default());
-        let r = eval_source("(no-such-func 1)", &mut ctx);
-        assert!(matches!(r, Err(EvalError::UndefinedFunction(_))));
-    }
-
-    #[test]
-    fn include_requires_sandbox() {
-        let mut ctx = Context::new(EvalConfig::default());
-        let r = eval_source("(include \"foo.trongo\")", &mut ctx);
-        assert!(matches!(r, Err(EvalError::NoSandbox)));
-    }
-
-    #[test]
-    fn simple_template_macro() {
-        // `unless` substitutes params directly into the template.
-        let v = eval_str(
-            "(defmacro unless [c body] (if c nil body))
-             (unless false 42)",
-        );
-        assert_eq!(v, Value::Number(42.into()));
-    }
-
-    #[test]
-    fn macro_with_quasiquote() {
-        let v = eval_str(
-            "(defmacro inc [x] `(+ ~x 1))
-             (inc 41)",
-        );
-        assert_eq!(v, Value::Number(42.into()));
-    }
-
-    #[test]
-    fn macro_with_unquote_splicing() {
-        let v = eval_str(
-            "(defmacro sum-of [& xs] `(+ ~@xs))
-             (sum-of 1 2 3 4)",
-        );
-        assert_eq!(v, Value::Number(10.into()));
-    }
-
-    #[test]
-    fn macro_with_rest_param_no_quasi() {
-        let v = eval_str(
-            "(defmacro first-of [& xs] (first xs))
-             (first-of 100 200 300)",
-        );
-        assert_eq!(v, Value::Number(100.into()));
-    }
-
-    #[test]
-    fn macroexpand_returns_expansion() {
-        let v = eval_str(
-            "(defmacro unless [c b] (if c nil b))
-             (macroexpand '(unless x y))",
-        );
-        // The expansion is `(if x nil y)`; quoted to a vector of values.
-        let arr = v.as_array().unwrap();
-        assert_eq!(arr[0], Value::String("if".into()));
-        assert_eq!(arr[1], Value::String("x".into()));
-        assert_eq!(arr[2], Value::Null);
-        assert_eq!(arr[3], Value::String("y".into()));
-    }
-
-    #[test]
-    fn macro_expansion_depth_bounded() {
-        let mut ctx = Context::new(EvalConfig::default());
-        ctx.max_macro_expansion_depth = 10;
-        let r = eval_source(
-            "(defmacro loop-me [] (loop-me))
-             (loop-me)",
-            &mut ctx,
-        );
-        assert!(matches!(r, Err(EvalError::InvalidForm(_))));
-    }
-
-    #[test]
-    fn quasiquote_alone_works_as_data_literal() {
-        // Outside a macro, `(quasiquote ...)` builds a data structure.
-        let v = eval_str("`[1 2 ~(+ 1 2) 4]");
-        let arr = v.as_array().unwrap();
-        assert_eq!(arr[0], Value::Number(1.into()));
-        assert_eq!(arr[2], Value::Number(3.into()));
-        assert_eq!(arr[3], Value::Number(4.into()));
+        // List form: the interesting case.
+        Expr::List(items) => partial_eval_list(items, ctx, opaque_forms),
     }
 }
+
+fn partial_eval_list(
+    items: &[Expr],
+    ctx: &mut Context,
+    opaque_forms: &HashSet<String>,
+) -> EvalResult<Partial> {
+    let Some(head) = items.first() else {
+        // Empty list: fully reducible.
+        return eval(&Expr::List(vec![]), ctx).map(Partial::Done);
+    };
+
+    if let Expr::Symbol(name) = head {
+        // Opaque form: suspend, but first reduce its arguments so that any
+        // in-scope variables and pure subexpressions are resolved to literals.
+        // The head stays opaque; an argument that is itself an opaque form stays
+        // suspended (handled by the recursion). This is what lets a suspended
+        // `(run-activity :args {:x let-bound-var})` carry the *value* of the
+        // variable rather than its unresolved name.
+        if opaque_forms.contains(name.as_str()) {
+            let mut reduced: Vec<Expr> = Vec::with_capacity(items.len());
+            reduced.push(head.clone());
+            for arg in &items[1..] {
+                match arg {
+                    // Keep keywords verbatim — they are argument labels, not
+                    // values to evaluate.
+                    Expr::Keyword(_) => reduced.push(arg.clone()),
+                    _ => match partial_eval(arg, ctx, opaque_forms)? {
+                        Partial::Done(v) => reduced.push(value_to_expr(&v)),
+                        Partial::Suspended(e) => reduced.push(e),
+                    },
+                }
+            }
+            return Ok(Partial::Suspended(Expr::List(reduced)));
+        }
+
+        // `if`: only reduce the live branch.
+        if name == "if" {
+            return partial_eval_if(&items[1..], ctx, opaque_forms);
+        }
+
+        // Sequencing and binding forms that *can* be split across a suspension
+        // boundary, as long as we respect their evaluation semantics. These are
+        // the forms a durable workflow actually uses to thread activity results,
+        // so partial evaluation has to understand them rather than punt to
+        // `eval` (which would error on a contained opaque form).
+        if name == "do" {
+            return partial_eval_do(&items[1..], ctx, opaque_forms);
+        }
+        if name == "let" {
+            return partial_eval_let(&items[1..], ctx, opaque_forms);
+        }
+        if name == "when" {
+            return partial_eval_when(&items[1..], ctx, opaque_forms);
+        }
+
+        // Remaining special forms with structure that cannot be decomposed
+        // argument-by-argument (the binding vector or quoted body contains
+        // unbound names, not evaluable sub-expressions). Hand them straight to
+        // the normal evaluator; if they contain an opaque sub-form they will
+        // error, but these forms cannot meaningfully be split across a
+        // suspension boundary anyway.
+        if matches!(
+            name.as_str(),
+            "fn" | "defn" | "defmacro" | "macroexpand"
+                | "quote" | "quasiquote" | "unquote" | "unquote-splicing"
+                | "and" | "or" | "def"
+                | "include" | "read-file" | "list-files" | "glob" | "use"
+        ) {
+            return eval(&Expr::List(items.to_vec()), ctx).map(Partial::Done);
+        }
+    }
+
+    // For regular function calls (symbol head that is a builtin or user fn, or
+    // a first-class expression head): keep the head as-is and partially eval
+    // each argument. Evaluating a symbol head through partial_eval would try to
+    // resolve it as a variable, which fails for builtins in the dispatch table.
+    let mut reduced: Vec<Expr> = Vec::with_capacity(items.len());
+    let mut any_suspended = false;
+
+    for (i, item) in items.iter().enumerate() {
+        if i == 0 && matches!(item, Expr::Symbol(_)) {
+            // Symbol head: keep verbatim.
+            reduced.push(item.clone());
+            continue;
+        }
+        match partial_eval(item, ctx, opaque_forms)? {
+            Partial::Done(v) => reduced.push(value_to_expr(&v)),
+            Partial::Suspended(e) => {
+                any_suspended = true;
+                reduced.push(e);
+            }
+        }
+    }
+
+    if any_suspended {
+        Ok(Partial::Suspended(Expr::List(reduced)))
+    } else {
+        eval(&Expr::List(items.to_vec()), ctx).map(Partial::Done)
+    }
+}
+
+fn partial_eval_if(
+    args: &[Expr],
+    ctx: &mut Context,
+    opaque_forms: &HashSet<String>,
+) -> EvalResult<Partial> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(EvalError::Arity {
+            function: "if".into(),
+            expected: "2 or 3".into(),
+            actual: args.len(),
+        });
+    }
+
+    match partial_eval(&args[0], ctx, opaque_forms)? {
+        Partial::Suspended(cond_expr) => {
+            // Condition is dynamic — the whole if is suspended.
+            // Partially reduce both branches so any nested pure work is folded.
+            let then_expr = match partial_eval(&args[1], ctx, opaque_forms)? {
+                Partial::Done(v) => value_to_expr(&v),
+                Partial::Suspended(e) => e,
+            };
+            let else_expr = if args.len() == 3 {
+                match partial_eval(&args[2], ctx, opaque_forms)? {
+                    Partial::Done(v) => value_to_expr(&v),
+                    Partial::Suspended(e) => e,
+                }
+            } else {
+                Expr::Nil
+            };
+            let mut rebuilt = vec![Expr::Symbol("if".into()), cond_expr, then_expr];
+            if args.len() == 3 {
+                rebuilt.push(else_expr);
+            }
+            Ok(Partial::Suspended(Expr::List(rebuilt)))
+        }
+        Partial::Done(cond_val) => {
+            // Condition is known — reduce only the live branch.
+            if is_truthy(&cond_val) {
+                partial_eval(&args[1], ctx, opaque_forms)
+            } else if args.len() == 3 {
+                partial_eval(&args[2], ctx, opaque_forms)
+            } else {
+                Ok(Partial::Done(Value::Null))
+            }
+        }
+    }
+}
+
+/// Partially evaluate a `(do form ...)` sequence.
+///
+/// Each form is reduced in order, sharing the context. If every form reduces,
+/// the value of the `do` is the value of the last. If any form suspends, the
+/// whole `do` suspends; already-reduced leading forms are folded to literals and
+/// the remaining forms are kept so the next cycle resumes where this one left
+/// off.
+fn partial_eval_do(
+    args: &[Expr],
+    ctx: &mut Context,
+    opaque_forms: &HashSet<String>,
+) -> EvalResult<Partial> {
+    if args.is_empty() {
+        return Ok(Partial::Done(Value::Null));
+    }
+    let mut reduced: Vec<Expr> = Vec::with_capacity(args.len() + 1);
+    reduced.push(Expr::Symbol("do".into()));
+    let mut suspended_from: Option<usize> = None;
+    let mut last_value = Value::Null;
+
+    for (i, form) in args.iter().enumerate() {
+        if suspended_from.is_some() {
+            // Once suspended, keep the rest verbatim — they have not run.
+            reduced.push(form.clone());
+            continue;
+        }
+        match partial_eval(form, ctx, opaque_forms)? {
+            Partial::Done(v) => {
+                last_value = v.clone();
+                // A pure leading statement's value is discarded by `do`; we keep
+                // its literal only as a placeholder so positions are preserved.
+                reduced.push(value_to_expr(&v));
+            }
+            Partial::Suspended(e) => {
+                suspended_from = Some(i);
+                reduced.push(e);
+            }
+        }
+    }
+
+    if suspended_from.is_some() {
+        Ok(Partial::Suspended(Expr::List(reduced)))
+    } else {
+        Ok(Partial::Done(last_value))
+    }
+}
+
+/// Partially evaluate a `(let [name value ...] body ...)` form.
+///
+/// Bindings are reduced in order in a fresh scope. A binding whose value reduces
+/// is bound immediately, so later bindings and the body can use it. A binding
+/// whose value suspends halts progress: the body may depend on the unbound name,
+/// so the whole `let` suspends, keeping the suspended binding and every later
+/// binding and body form intact for the next cycle. Bindings already reduced are
+/// folded to literals so they are not recomputed.
+fn partial_eval_let(
+    args: &[Expr],
+    ctx: &mut Context,
+    opaque_forms: &HashSet<String>,
+) -> EvalResult<Partial> {
+    let Some((bindings_expr, body)) = args.split_first() else {
+        return Err(EvalError::InvalidForm(
+            "let requires a bindings vector and a body".into(),
+        ));
+    };
+    let bindings = match bindings_expr {
+        Expr::Vector(items) => items,
+        _ => return Err(EvalError::InvalidForm("let bindings must be a vector".into())),
+    };
+    if bindings.len() % 2 != 0 {
+        return Err(EvalError::InvalidForm(
+            "let bindings must have an even number of forms".into(),
+        ));
+    }
+
+    ctx.push_scope();
+    let outcome: EvalResult<Partial> = (|| {
+        let mut reduced_bindings: Vec<Expr> = Vec::with_capacity(bindings.len());
+        let mut i = 0;
+        let mut suspended = false;
+        while i < bindings.len() {
+            let name_expr = &bindings[i];
+            let name = match name_expr {
+                Expr::Symbol(s) => s.clone(),
+                other => {
+                    return Err(EvalError::InvalidForm(format!(
+                        "let binding name must be a symbol, got {:?}",
+                        other
+                    )))
+                }
+            };
+            if suspended {
+                // Already suspended: keep the remaining bindings verbatim.
+                reduced_bindings.push(name_expr.clone());
+                reduced_bindings.push(bindings[i + 1].clone());
+                i += 2;
+                continue;
+            }
+            match partial_eval(&bindings[i + 1], ctx, opaque_forms)? {
+                Partial::Done(v) => {
+                    ctx.bind(&name, v.clone());
+                    reduced_bindings.push(name_expr.clone());
+                    reduced_bindings.push(value_to_expr(&v));
+                }
+                Partial::Suspended(e) => {
+                    suspended = true;
+                    reduced_bindings.push(name_expr.clone());
+                    reduced_bindings.push(e);
+                }
+            }
+            i += 2;
+        }
+
+        if suspended {
+            // Rebuild the let with the partially-reduced bindings and the
+            // untouched body; the body has not run.
+            let mut rebuilt = vec![Expr::Symbol("let".into()), Expr::Vector(reduced_bindings)];
+            rebuilt.extend(body.iter().cloned());
+            return Ok(Partial::Suspended(Expr::List(rebuilt)));
+        }
+
+        // All bindings reduced; partially evaluate the body in sequence.
+        let mut last = Partial::Done(Value::Null);
+        let mut body_residual: Vec<Expr> = Vec::with_capacity(body.len());
+        let mut body_suspended = false;
+        for form in body {
+            if body_suspended {
+                body_residual.push(form.clone());
+                continue;
+            }
+            match partial_eval(form, ctx, opaque_forms)? {
+                Partial::Done(v) => {
+                    body_residual.push(value_to_expr(&v));
+                    last = Partial::Done(v);
+                }
+                Partial::Suspended(e) => {
+                    body_suspended = true;
+                    body_residual.push(e);
+                }
+            }
+        }
+        if body_suspended {
+            // The body suspended after the bindings resolved. Keep the binding
+            // names in scope by re-emitting the `let` with the resolved bindings
+            // folded to literals and the partially-reduced body, so any unreduced
+            // body form can still reference the bound names next cycle.
+            let mut rebuilt = vec![Expr::Symbol("let".into()), Expr::Vector(reduced_bindings)];
+            rebuilt.extend(body_residual);
+            Ok(Partial::Suspended(Expr::List(rebuilt)))
+        } else {
+            Ok(last)
+        }
+    })();
+    ctx.pop_scope();
+    outcome
+}
+
+/// Partially evaluate a `(when cond body ...)` form as `(if cond (do body) nil)`.
+fn partial_eval_when(
+    args: &[Expr],
+    ctx: &mut Context,
+    opaque_forms: &HashSet<String>,
+) -> EvalResult<Partial> {
+    let Some((cond, body)) = args.split_first() else {
+        return Err(EvalError::InvalidForm("when requires a condition".into()));
+    };
+    let mut do_form = vec![Expr::Symbol("do".into())];
+    do_form.extend(body.iter().cloned());
+    let rewritten = [cond.clone(), Expr::List(do_form)];
+    partial_eval_if(&rewritten, ctx, opaque_forms)
+}
+
+#[cfg(test)]
+#[path = "tests/mod.rs"]
+mod tests;
+
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

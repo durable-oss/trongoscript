@@ -28,7 +28,7 @@
 use std::fmt;
 
 /// A Trongoscript expression / value form.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
     Nil,
     Bool(bool),
@@ -88,18 +88,18 @@ impl fmt::Display for Expr {
 }
 
 /// A whole document: zero or more top-level forms.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Module {
     pub forms: Vec<Expr>,
 }
 
 /// A template (ERB-like) document: raw text interleaved with Trongoscript blocks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Template {
     pub chunks: Vec<TemplateChunk>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TemplateChunk {
     /// Literal text to emit verbatim.
     Text(String),
