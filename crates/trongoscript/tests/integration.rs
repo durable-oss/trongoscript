@@ -74,12 +74,102 @@ fn include_blocked_outside_root() {
 }
 
 #[test]
-fn include_absolute_path_rejected() {
+fn include_absolute_path_cannot_reach_host_root() {
     let root = examples_dir().join("with_includes");
     let sb = Sandbox::new(&root).unwrap();
     let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+    // `/etc/passwd` is absolute in *sandbox* space: it means
+    // `<root>/etc/passwd`, which doesn't exist. The host's real
+    // /etc/passwd does exist, so a leak would succeed rather than fail.
     let r = eval_source(r#"(include "/etc/passwd")"#, &mut ctx);
     assert!(r.is_err());
+
+    // Read the host file directly to be sure the failure above isn't just
+    // this machine lacking /etc/passwd.
+    if let Ok(host) = std::fs::read_to_string("/etc/passwd") {
+        let mut ctx =
+            Context::new(EvalConfig::default().with_sandbox(Sandbox::new(&root).unwrap()));
+        let v = eval_source(r#"(read-file "/etc/passwd")"#, &mut ctx);
+        match v {
+            Err(_) => {}
+            Ok(got) => panic!(
+                "sandbox leaked the host /etc/passwd (matches host: {})",
+                got == serde_json::Value::String(host)
+            ),
+        }
+    }
+}
+
+#[test]
+fn bind_mount_exposes_a_second_tree() {
+    // ./bob is the sandbox root; ./tom is mounted at /tom. Scripts reach
+    // ./bob/x as /x and ./tom/y as /tom/y.
+    let tmp = std::env::temp_dir().join(format!(
+        "trongo-mount-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(tmp.join("bob")).unwrap();
+    std::fs::create_dir_all(tmp.join("tom")).unwrap();
+    std::fs::write(tmp.join("bob/x"), "from-bob").unwrap();
+    std::fs::write(tmp.join("tom/y"), "from-tom").unwrap();
+    std::fs::write(tmp.join("tom/lib.trongo"), r#"{:who "tom"}"#).unwrap();
+
+    let sb = Sandbox::new(tmp.join("bob"))
+        .unwrap()
+        .mount("/tom", tmp.join("tom"))
+        .unwrap();
+    let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+
+    let v = eval_source(
+        r#"{:x (read-file "/x") :y (read-file "/tom/y") :lib (include "/tom/lib.trongo")}"#,
+        &mut ctx,
+    )
+    .expect("eval");
+    assert_eq!(v["x"], serde_json::Value::String("from-bob".into()));
+    assert_eq!(v["y"], serde_json::Value::String("from-tom".into()));
+    assert_eq!(v["lib"]["who"], serde_json::Value::String("tom".into()));
+
+    // A script in the root mount cannot climb sideways into ./tom on disk.
+    let r = eval_source(r#"(read-file "../tom/y")"#, &mut ctx);
+    assert!(matches!(r, Err(EvalError::Sandbox(_))), "got {:?}", r);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn include_inside_a_mount_stays_in_that_mount() {
+    let tmp = std::env::temp_dir().join(format!(
+        "trongo-mount-esc-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(tmp.join("bob")).unwrap();
+    std::fs::create_dir_all(tmp.join("tom")).unwrap();
+    std::fs::write(tmp.join("bob/secret.trongo"), r#"{:leaked true}"#).unwrap();
+    // A file in the mount that tries to relative-include out of it.
+    std::fs::write(
+        tmp.join("tom/evil.trongo"),
+        r#"(include "../bob/secret.trongo")"#,
+    )
+    .unwrap();
+
+    let sb = Sandbox::new(tmp.join("bob"))
+        .unwrap()
+        .mount("/tom", tmp.join("tom"))
+        .unwrap();
+    let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+
+    let r = eval_source(r#"(include "/tom/evil.trongo")"#, &mut ctx);
+    assert!(matches!(r, Err(EvalError::Sandbox(_))), "got {:?}", r);
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test]
@@ -98,10 +188,7 @@ fn embedded_yaml() {
     let root: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
     let mut ctx = Context::new(EvalConfig::default());
     let v = evaluate_embedded_yaml(root, &mut ctx).expect("embed eval");
-    assert_eq!(
-        v["title"],
-        Value::String("PRODUCTION ENVIRONMENT".into())
-    );
+    assert_eq!(v["title"], Value::String("PRODUCTION ENVIRONMENT".into()));
     assert_eq!(v["counts"]["servers"], Value::Number(12.into()));
     assert_eq!(v["counts"]["shards"], Value::Number(16.into()));
 }
@@ -109,10 +196,7 @@ fn embedded_yaml() {
 #[test]
 fn host_builtin_can_be_registered() {
     let host = std::sync::Arc::new(|_ctx: &mut Context, args: &[Value]| {
-        let n = args
-            .iter()
-            .filter_map(|v| v.as_i64())
-            .sum::<i64>();
+        let n = args.iter().filter_map(|v| v.as_i64()).sum::<i64>();
         Ok(Value::Number((n * 100).into()))
     });
     let cfg = EvalConfig::default().with_host_builtin("scale-sum", host);
@@ -232,6 +316,85 @@ fn strings_module_basic() {
 }
 
 #[test]
+fn serde_module_emits_all_three_formats() {
+    let mut ctx = Context::new(EvalConfig::default());
+    let v = eval_source(
+        r#"(use serde)
+           (let [doc {:name "x" :ver 2}]
+             {:json   (to-json doc)
+              :pretty (to-json {:a 1} true)
+              :yaml   (to-yaml doc)
+              :toml   (to-toml doc)})"#,
+        &mut ctx,
+    )
+    .unwrap();
+    assert_eq!(v["json"], Value::String(r#"{"name":"x","ver":2}"#.into()));
+    assert_eq!(v["pretty"], Value::String("{\n  \"a\": 1\n}".into()));
+    assert_eq!(v["yaml"], Value::String("name: x\nver: 2\n".into()));
+    assert_eq!(v["toml"], Value::String("name = \"x\"\nver = 2\n".into()));
+}
+
+#[test]
+fn serde_module_parses_all_three_formats() {
+    let mut ctx = Context::new(EvalConfig::default());
+    let v = eval_source(
+        r#"(use serde)
+           {:json (parse-json "{\"a\":[1,2]}")
+            :yaml (parse-yaml "a:\n  - 1\n  - 2\n")
+            :toml (parse-toml "a = [1, 2]\n")}"#,
+        &mut ctx,
+    )
+    .unwrap();
+    let expected = serde_json::json!({"a": [1, 2]});
+    assert_eq!(v["json"], expected);
+    assert_eq!(v["yaml"], expected);
+    assert_eq!(v["toml"], expected);
+}
+
+#[test]
+fn serde_round_trips_through_each_format() {
+    let mut ctx = Context::new(EvalConfig::default());
+    let v = eval_source(
+        r#"(use serde)
+           (let [doc {:a 1 :b ["x" true] :c {:d 1.5}}]
+             {:json (parse-json (to-json doc))
+              :yaml (parse-yaml (to-yaml doc))
+              :toml (parse-toml (to-toml doc))})"#,
+        &mut ctx,
+    )
+    .unwrap();
+    let expected = serde_json::json!({"a": 1, "b": ["x", true], "c": {"d": 1.5}});
+    assert_eq!(v["json"], expected);
+    assert_eq!(v["yaml"], expected);
+    assert_eq!(v["toml"], expected);
+}
+
+#[test]
+fn serde_functions_hidden_until_use() {
+    let mut ctx = Context::new(EvalConfig::default());
+    let err = eval_source("(to-json {:a 1})", &mut ctx).unwrap_err();
+    assert!(
+        err.to_string().contains("to-json"),
+        "expected an undefined-function error, got: {err}"
+    );
+}
+
+#[test]
+fn serde_to_toml_rejects_unrepresentable_documents() {
+    let mut ctx = Context::new(EvalConfig::default());
+
+    // TOML documents must be tables.
+    let err = eval_source("(use serde) (to-toml [1 2])", &mut ctx).unwrap_err();
+    assert!(err.to_string().contains("map"), "got: {err}");
+
+    // TOML has no null, and the error names the offending path.
+    let err = eval_source("(use serde) (to-toml {:pkg {:name nil}})", &mut ctx).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("no null"), "got: {msg}");
+    assert!(msg.contains("pkg.name"), "got: {msg}");
+}
+
+#[test]
 fn collections_module_basic() {
     let mut ctx = Context::new(EvalConfig::default());
     let v = eval_source(
@@ -348,7 +511,10 @@ fn glob_returns_matching_paths() {
 
     let v = eval_source(r#"(glob "**/*.yaml")"#, &mut ctx).unwrap();
     let arr = v.as_array().unwrap();
-    let mut paths: Vec<String> = arr.iter().map(|v| v.as_str().unwrap().to_string()).collect();
+    let mut paths: Vec<String> = arr
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
     paths.sort();
     assert_eq!(paths, vec!["a.yaml", "b.yaml", "sub/c.yaml"]);
 
@@ -435,11 +601,7 @@ fn rng_rand_int_rejects_empty_range() {
 #[test]
 fn rng_choose_picks_from_list() {
     let mut ctx = Context::new(EvalConfig::default().with_rng_seed(3));
-    let v = eval_source(
-        r#"(use rng) (choose ["red" "green" "blue"])"#,
-        &mut ctx,
-    )
-    .unwrap();
+    let v = eval_source(r#"(use rng) (choose ["red" "green" "blue"])"#, &mut ctx).unwrap();
     let s = v.as_str().unwrap();
     assert!(["red", "green", "blue"].contains(&s));
 }
@@ -473,11 +635,7 @@ fn rng_dice_roll_zero_dice_is_zero() {
 #[test]
 fn rng_shuffle_preserves_elements() {
     let mut ctx = Context::new(EvalConfig::default().with_rng_seed(5));
-    let v = eval_source(
-        "(use rng) (shuffle [1 2 3 4 5 6 7 8 9 10])",
-        &mut ctx,
-    )
-    .unwrap();
+    let v = eval_source("(use rng) (shuffle [1 2 3 4 5 6 7 8 9 10])", &mut ctx).unwrap();
     let arr = v.as_array().unwrap();
     let mut sorted: Vec<i64> = arr.iter().map(|x| x.as_i64().unwrap()).collect();
     sorted.sort();
@@ -517,16 +675,8 @@ fn rng_calls_share_state() {
 fn spintax_one_arg_uses_context_seed() {
     let mut a = Context::new(EvalConfig::default().with_rng_seed(7));
     let mut b = Context::new(EvalConfig::default().with_rng_seed(7));
-    let va = eval_source(
-        r#"(use strings rng) (spintax "{a|b|c|d|e}")"#,
-        &mut a,
-    )
-    .unwrap();
-    let vb = eval_source(
-        r#"(use strings rng) (spintax "{a|b|c|d|e}")"#,
-        &mut b,
-    )
-    .unwrap();
+    let va = eval_source(r#"(use strings rng) (spintax "{a|b|c|d|e}")"#, &mut a).unwrap();
+    let vb = eval_source(r#"(use strings rng) (spintax "{a|b|c|d|e}")"#, &mut b).unwrap();
     assert_eq!(va, vb);
 }
 
@@ -534,11 +684,7 @@ fn spintax_one_arg_uses_context_seed() {
 fn spintax_two_arg_still_works() {
     // 2-arg form keeps its old behavior: explicit seed, no context dep.
     let mut ctx = Context::new(EvalConfig::default());
-    let v = eval_source(
-        r#"(use strings) (spintax "{a|b|c}" 1)"#,
-        &mut ctx,
-    )
-    .unwrap();
+    let v = eval_source(r#"(use strings) (spintax "{a|b|c}" 1)"#, &mut ctx).unwrap();
     assert!(["a", "b", "c"].contains(&v.as_str().unwrap()));
 }
 
@@ -547,8 +693,11 @@ fn modules_have_no_io_capability() {
     // None of the new modules should expose anything that touches the FS
     // or shells out, even without a sandbox configured.
     let mut ctx = Context::new(EvalConfig::default());
-    let _ = eval_source("(use math strings collections finance predicates)", &mut ctx)
-        .unwrap();
+    let _ = eval_source(
+        "(use math strings collections finance predicates)",
+        &mut ctx,
+    )
+    .unwrap();
     // include / read-file / list-files still require a sandbox to do
     // anything — confirm they're untouched and still gated.
     let r = eval_source(r#"(read-file "x")"#, &mut ctx);
@@ -652,11 +801,14 @@ fn map_filter_compose() {
                 (filter (fn [x] (> x 2)) [1 2 3 4 5]))"#,
     );
     let arr = v.as_array().unwrap();
-    assert_eq!(arr, &vec![
-        Value::Number(30.into()),
-        Value::Number(40.into()),
-        Value::Number(50.into()),
-    ]);
+    assert_eq!(
+        arr,
+        &vec![
+            Value::Number(30.into()),
+            Value::Number(40.into()),
+            Value::Number(50.into()),
+        ]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +816,12 @@ fn map_filter_compose() {
 // ---------------------------------------------------------------------------
 
 fn ints(xs: &[i64]) -> Value {
-    Value::Array(xs.iter().copied().map(|n| Value::Number(n.into())).collect())
+    Value::Array(
+        xs.iter()
+            .copied()
+            .map(|n| Value::Number(n.into()))
+            .collect(),
+    )
 }
 
 #[test]
@@ -721,10 +878,22 @@ fn some_returns_first_truthy() {
 
 #[test]
 fn notany_and_notevery() {
-    assert_eq!(eval(r#"(notany (fn [x] (> x 100)) [1 2 3])"#), Value::Bool(true));
-    assert_eq!(eval(r#"(notany (fn [x] (> x 2))   [1 2 3])"#), Value::Bool(false));
-    assert_eq!(eval(r#"(notevery (fn [x] (> x 0)) [1 -1])"#),  Value::Bool(true));
-    assert_eq!(eval(r#"(notevery (fn [x] (> x 0)) [1 2])"#),   Value::Bool(false));
+    assert_eq!(
+        eval(r#"(notany (fn [x] (> x 100)) [1 2 3])"#),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval(r#"(notany (fn [x] (> x 2))   [1 2 3])"#),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval(r#"(notevery (fn [x] (> x 0)) [1 -1])"#),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval(r#"(notevery (fn [x] (> x 0)) [1 2])"#),
+        Value::Bool(false)
+    );
 }
 
 #[test]
@@ -749,10 +918,7 @@ fn find_if_and_not() {
         eval(r#"(find-if-not (fn [x] (> x 2)) [1 2 3 4])"#),
         Value::Number(1.into())
     );
-    assert_eq!(
-        eval(r#"(find-if (fn [x] (> x 100)) [1 2 3])"#),
-        Value::Null
-    );
+    assert_eq!(eval(r#"(find-if (fn [x] (> x 100)) [1 2 3])"#), Value::Null);
 }
 
 #[test]
@@ -793,13 +959,11 @@ fn remove_if_and_not() {
 
 #[test]
 fn assoc_if_finds_pair_by_key() {
-    let v = eval(
-        r#"(assoc-if (fn [k] (= k "b")) [["a" 1] ["b" 2] ["c" 3]])"#,
+    let v = eval(r#"(assoc-if (fn [k] (= k "b")) [["a" 1] ["b" 2] ["c" 3]])"#);
+    assert_eq!(
+        v,
+        Value::Array(vec![Value::String("b".into()), Value::Number(2.into()),])
     );
-    assert_eq!(v, Value::Array(vec![
-        Value::String("b".into()),
-        Value::Number(2.into()),
-    ]));
     assert_eq!(
         eval(r#"(assoc-if (fn [k] (= k "z")) [["a" 1]])"#),
         Value::Null
@@ -808,42 +972,34 @@ fn assoc_if_finds_pair_by_key() {
 
 #[test]
 fn assoc_if_not_skips_matches() {
-    let v = eval(
-        r#"(assoc-if-not (fn [k] (= k "a")) [["a" 1] ["b" 2]])"#,
+    let v = eval(r#"(assoc-if-not (fn [k] (= k "a")) [["a" 1] ["b" 2]])"#);
+    assert_eq!(
+        v,
+        Value::Array(vec![Value::String("b".into()), Value::Number(2.into()),])
     );
-    assert_eq!(v, Value::Array(vec![
-        Value::String("b".into()),
-        Value::Number(2.into()),
-    ]));
 }
 
 #[test]
 fn rassoc_if_finds_pair_by_value() {
-    let v = eval(
-        r#"(rassoc-if (fn [v] (= v 2)) [["a" 1] ["b" 2] ["c" 3]])"#,
+    let v = eval(r#"(rassoc-if (fn [v] (= v 2)) [["a" 1] ["b" 2] ["c" 3]])"#);
+    assert_eq!(
+        v,
+        Value::Array(vec![Value::String("b".into()), Value::Number(2.into()),])
     );
-    assert_eq!(v, Value::Array(vec![
-        Value::String("b".into()),
-        Value::Number(2.into()),
-    ]));
 }
 
 #[test]
 fn rassoc_if_not_skips_matching_values() {
-    let v = eval(
-        r#"(rassoc-if-not (fn [v] (= v 1)) [["a" 1] ["b" 2]])"#,
+    let v = eval(r#"(rassoc-if-not (fn [v] (= v 1)) [["a" 1] ["b" 2]])"#);
+    assert_eq!(
+        v,
+        Value::Array(vec![Value::String("b".into()), Value::Number(2.into()),])
     );
-    assert_eq!(v, Value::Array(vec![
-        Value::String("b".into()),
-        Value::Number(2.into()),
-    ]));
 }
 
 #[test]
 fn subst_if_replaces_leaves_in_tree() {
-    let v = eval(
-        r#"(subst-if "X" (fn [n] (= n 2)) [1 [2 3] {:k 2 :j [2]}])"#,
-    );
+    let v = eval(r#"(subst-if "X" (fn [n] (= n 2)) [1 [2 3] {:k 2 :j [2]}])"#);
     // 2 was replaced everywhere it appeared as a leaf.
     let outer = v.as_array().unwrap();
     assert_eq!(outer[0], Value::Number(1.into()));
@@ -865,23 +1021,25 @@ fn subst_if_not_replaces_non_matches() {
 
     // Atom-level behavior: matching root is preserved, non-matching root
     // is replaced.
-    assert_eq!(eval(r#"(subst-if-not "x" (fn [n] (= n 1)) 1)"#), Value::Number(1.into()));
-    assert_eq!(eval(r#"(subst-if-not "x" (fn [n] (= n 1)) 2)"#), Value::String("x".into()));
+    assert_eq!(
+        eval(r#"(subst-if-not "x" (fn [n] (= n 1)) 1)"#),
+        Value::Number(1.into())
+    );
+    assert_eq!(
+        eval(r#"(subst-if-not "x" (fn [n] (= n 1)) 2)"#),
+        Value::String("x".into())
+    );
 }
 
 #[test]
 fn substitute_if_top_level_only() {
-    let v = eval(
-        r#"(substitute-if 0 (fn [n] (> n 2)) [1 2 3 4 5])"#,
-    );
+    let v = eval(r#"(substitute-if 0 (fn [n] (> n 2)) [1 2 3 4 5])"#);
     assert_eq!(v, ints(&[1, 2, 0, 0, 0]));
 }
 
 #[test]
 fn substitute_if_not_top_level_only() {
-    let v = eval(
-        r#"(substitute-if-not 0 (fn [n] (> n 2)) [1 2 3 4 5])"#,
-    );
+    let v = eval(r#"(substitute-if-not 0 (fn [n] (> n 2)) [1 2 3 4 5])"#);
     assert_eq!(v, ints(&[0, 0, 3, 4, 5]));
 }
 
@@ -939,9 +1097,7 @@ fn constantly_ignores_args() {
 
 #[test]
 fn complement_inverts_predicate() {
-    let v = eval(
-        r#"(filter (complement (fn [x] (> x 2))) [1 2 3 4 5])"#,
-    );
+    let v = eval(r#"(filter (complement (fn [x] (> x 2))) [1 2 3 4 5])"#);
     assert_eq!(v, ints(&[1, 2]));
 }
 
@@ -953,13 +1109,19 @@ fn remove_duplicates_keeps_first_occurrence() {
 
 #[test]
 fn tree_equal_compares_structurally() {
-    assert_eq!(eval(r#"(tree-equal [1 [2 3]] [1 [2 3]])"#), Value::Bool(true));
-    assert_eq!(eval(r#"(tree-equal [1 [2 3]] [1 [2 4]])"#), Value::Bool(false));
+    assert_eq!(
+        eval(r#"(tree-equal [1 [2 3]] [1 [2 3]])"#),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval(r#"(tree-equal [1 [2 3]] [1 [2 4]])"#),
+        Value::Bool(false)
+    );
 }
 
 #[test]
 fn set_operations() {
-    assert_eq!(eval(r#"(union [1 2 3] [3 4 5])"#),         ints(&[1, 2, 3, 4, 5]));
+    assert_eq!(eval(r#"(union [1 2 3] [3 4 5])"#), ints(&[1, 2, 3, 4, 5]));
     assert_eq!(eval(r#"(intersection [1 2 3 4] [2 4 6])"#), ints(&[2, 4]));
     assert_eq!(eval(r#"(set-difference [1 2 3 4] [2 4])"#), ints(&[1, 3]));
     assert_eq!(eval(r#"(set-exclusive-or [1 2 3] [2 3 4])"#), ints(&[1, 4]));

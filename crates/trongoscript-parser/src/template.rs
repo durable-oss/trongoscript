@@ -86,7 +86,10 @@ pub fn parse_template(source: &str) -> Result<Template, ParseError> {
                     chunks.push(TemplateChunk::Silent(forms));
                     // Trim line — swallow trailing newline for silent tags so
                     // `<% ... %>` lines don't leave blank lines in output.
-                    if let Some(s) = rest.strip_prefix("\r\n").or_else(|| rest.strip_prefix('\n')) {
+                    if let Some(s) = rest
+                        .strip_prefix("\r\n")
+                        .or_else(|| rest.strip_prefix('\n'))
+                    {
                         rest = s;
                     }
                 } else {

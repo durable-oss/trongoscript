@@ -11,9 +11,8 @@
 
 /// (name, source) for every Trongoscript-defined module. The source is
 /// `include_str!`'d at compile time, so the binary is self-contained.
-pub const TS_MODULES: &[(&str, &str)] = &[
-    ("predicates", include_str!("modules/predicates.trongo")),
-];
+pub const TS_MODULES: &[(&str, &str)] =
+    &[("predicates", include_str!("modules/predicates.trongo"))];
 
 /// Modules that have no inventory builtins and no TS source — they're
 /// implemented entirely as context-aware host functions in the evaluator

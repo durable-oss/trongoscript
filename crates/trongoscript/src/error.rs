@@ -1,8 +1,8 @@
 //! Trongoscript error types.
 
+use thiserror::Error;
 use trongoscript_parser::ParseError;
 use trongoscript_stdlib::BuiltinError;
-use thiserror::Error;
 
 use crate::sandbox::SandboxError;
 

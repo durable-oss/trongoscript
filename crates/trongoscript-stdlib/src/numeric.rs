@@ -99,7 +99,23 @@ fn rem(args: &[Value]) -> BuiltinResult {
     Ok(num_from_f64(a % b))
 }
 
+/// Absolute value.
+///
+/// Integers are handled without a round trip through `f64`, so magnitudes
+/// beyond 2^53 keep full precision. `abs` of `i64::MIN` does not fit in an
+/// `i64`, so it is returned as an unsigned number rather than saturating.
 fn abs(args: &[Value]) -> BuiltinResult {
+    if let Value::Number(n) = &args[0] {
+        if let Some(i) = n.as_i64() {
+            return Ok(match i.checked_abs() {
+                Some(a) => Value::Number(a.into()),
+                None => Value::Number((i.unsigned_abs()).into()),
+            });
+        }
+        if n.as_u64().is_some() {
+            return Ok(args[0].clone());
+        }
+    }
     Ok(num_from_f64(expect_number("abs", &args[0])?.abs()))
 }
 
@@ -192,5 +208,43 @@ inventory::submit! { Builtin::new("<",        2, 2, lt) }
 inventory::submit! { Builtin::new(">",        2, 2, gt) }
 inventory::submit! { Builtin::new("<=",       2, 2, le) }
 inventory::submit! { Builtin::new(">=",       2, 2, ge) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call_abs(v: Value) -> Value {
+        abs(&[v]).unwrap()
+    }
+
+    #[test]
+    fn abs_basic() {
+        assert_eq!(call_abs(Value::from(-5i64)), Value::from(5i64));
+        assert_eq!(call_abs(Value::from(5i64)), Value::from(5i64));
+        assert_eq!(call_abs(Value::from(0i64)), Value::from(0i64));
+        assert_eq!(call_abs(Value::from(-2.5f64)), Value::from(2.5f64));
+        assert_eq!(call_abs(Value::from(2.5f64)), Value::from(2.5f64));
+    }
+
+    #[test]
+    fn abs_preserves_large_integers() {
+        // Beyond 2^53: an f64 round trip would lose the low bits.
+        let big = 9_007_199_254_740_993i64; // 2^53 + 1
+        assert_eq!(call_abs(Value::from(-big)), Value::from(big));
+        assert_eq!(call_abs(Value::from(i64::MAX)), Value::from(i64::MAX));
+    }
+
+    #[test]
+    fn abs_of_i64_min_does_not_saturate() {
+        let got = call_abs(Value::from(i64::MIN));
+        assert_eq!(got, Value::from(9_223_372_036_854_775_808u64));
+    }
+
+    #[test]
+    fn abs_rejects_non_numbers() {
+        assert!(abs(&[Value::String("nope".into())]).is_err());
+        assert!(abs(&[Value::Null]).is_err());
+    }
+}
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

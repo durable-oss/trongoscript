@@ -161,7 +161,9 @@ fn call_rand_int(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
             message: format!("expected lo < hi, got lo={} hi={}", lo, hi),
         }));
     }
-    Ok(Value::Number(next_int_in(&mut ctx.rng_state, lo, hi).into()))
+    Ok(Value::Number(
+        next_int_in(&mut ctx.rng_state, lo, hi).into(),
+    ))
 }
 
 fn call_choose(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {

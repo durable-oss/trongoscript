@@ -270,10 +270,7 @@ fn unquote_form(input: &str) -> PResult<Expr> {
         let (rest, inner) = form(rest)?;
         return Ok((
             rest,
-            Expr::List(vec![
-                Expr::Symbol("unquote-splicing".to_string()),
-                inner,
-            ]),
+            Expr::List(vec![Expr::Symbol("unquote-splicing".to_string()), inner]),
         ));
     }
     let (input, inner) = form(input)?;
@@ -343,7 +340,10 @@ fn map_form(input: &str) -> PResult<Expr> {
     let (input, _) = cut(nom_char('}'))(input)?;
     if items.len() % 2 != 0 {
         return Err(nom::Err::Failure(VerboseError {
-            errors: vec![(input, nom::error::VerboseErrorKind::Context("map requires an even number of forms"))],
+            errors: vec![(
+                input,
+                nom::error::VerboseErrorKind::Context("map requires an even number of forms"),
+            )],
         }));
     }
     let pairs: Vec<(Expr, Expr)> = items
@@ -481,20 +481,7 @@ fn is_symbol_char(c: char) -> bool {
     }
     !matches!(
         c,
-        '(' | ')'
-            | '['
-            | ']'
-            | '{'
-            | '}'
-            | '"'
-            | ';'
-            | '\''
-            | ','
-            | ':'
-            | '\\'
-            | '`'
-            | '~'
-            | '#'
+        '(' | ')' | '[' | ']' | '{' | '}' | '"' | ';' | '\'' | ',' | ':' | '\\' | '`' | '~' | '#'
     )
 }
 
@@ -510,7 +497,7 @@ mod tests {
     #[test]
     fn parses_atoms() {
         assert_eq!(one("42"), Expr::Number(42.0));
-        assert_eq!(one("-3.14"), Expr::Number(-3.14));
+        assert_eq!(one("-3.25"), Expr::Number(-3.25));
         assert_eq!(one("nil"), Expr::Nil);
         assert_eq!(one("true"), Expr::Bool(true));
         assert_eq!(one("false"), Expr::Bool(false));
@@ -575,13 +562,11 @@ mod tests {
 
     #[test]
     fn parses_nested() {
-        let _ = one(
-            r#"
+        let _ = one(r#"
             {:name "alice"
              :tags ["admin" "user"]
              :nested {:active true :count (+ 1 2)}}
-        "#,
-        );
+        "#);
     }
 
     #[test]

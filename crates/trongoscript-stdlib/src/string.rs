@@ -31,10 +31,7 @@ fn trim(args: &[Value]) -> BuiltinResult {
 fn split(args: &[Value]) -> BuiltinResult {
     let s = expect_string("split", &args[0])?;
     let sep = expect_string("split", &args[1])?;
-    let parts: Vec<Value> = s
-        .split(sep)
-        .map(|p| Value::String(p.to_string()))
-        .collect();
+    let parts: Vec<Value> = s.split(sep).map(|p| Value::String(p.to_string())).collect();
     Ok(Value::Array(parts))
 }
 

@@ -199,7 +199,7 @@ fn get(args: &[Value]) -> BuiltinResult {
 }
 
 fn assoc(args: &[Value]) -> BuiltinResult {
-    if args.len() < 3 || args.len() % 2 == 0 {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
         return Err(BuiltinError::ArgError {
             function: "assoc".into(),
             message: "expected (assoc m k v ...) with odd argument count >= 3".into(),

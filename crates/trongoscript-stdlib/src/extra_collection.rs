@@ -27,11 +27,10 @@ fn num_from_f64(n: f64) -> Value {
 fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            x.as_f64().and_then(|f| y.as_f64().map(|g| (f, g))).and_then(
-                |(f, g)| f.partial_cmp(&g),
-            )
-        }
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .and_then(|f| y.as_f64().map(|g| (f, g)))
+            .and_then(|(f, g)| f.partial_cmp(&g)),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
         (Value::Null, Value::Null) => Some(Ordering::Equal),
@@ -50,11 +49,7 @@ fn sort(args: &[Value]) -> BuiltinResult {
             if cmp_err.is_none() {
                 cmp_err = Some(BuiltinError::Failed {
                     function: "sort".into(),
-                    message: format!(
-                        "cannot compare {} with {}",
-                        type_name(x),
-                        type_name(y)
-                    ),
+                    message: format!("cannot compare {} with {}", type_name(x), type_name(y)),
                 });
             }
             std::cmp::Ordering::Equal
@@ -138,10 +133,7 @@ fn partition(args: &[Value]) -> BuiltinResult {
         });
     }
     let n = n as usize;
-    let out: Vec<Value> = a
-        .chunks(n)
-        .map(|c| Value::Array(c.to_vec()))
-        .collect();
+    let out: Vec<Value> = a.chunks(n).map(|c| Value::Array(c.to_vec())).collect();
     Ok(Value::Array(out))
 }
 

@@ -34,7 +34,13 @@ pub mod finance;
 pub mod logic;
 pub mod math;
 pub mod numeric;
+pub mod serde_fmt;
 pub mod string;
+
+/// Kani proof harnesses and the pure kernels they verify. Present in normal
+/// builds only as a small set of `pub(crate)` helpers plus their drift
+/// tests; the proofs themselves are `cfg(kani)`.
+mod verification;
 
 /// Result type for builtin functions.
 pub type BuiltinResult = Result<Value, BuiltinError>;
@@ -158,10 +164,7 @@ pub fn find_builtin(name: &str) -> Option<&'static Builtin> {
 /// Look up a builtin by name, honoring module visibility. Core builtins
 /// (`module == None`) always resolve; module-scoped builtins resolve only
 /// when `is_enabled(module_name)` returns true.
-pub fn find_builtin_for(
-    name: &str,
-    is_enabled: impl Fn(&str) -> bool,
-) -> Option<&'static Builtin> {
+pub fn find_builtin_for(name: &str, is_enabled: impl Fn(&str) -> bool) -> Option<&'static Builtin> {
     inventory::iter::<Builtin>.into_iter().find(|b| {
         b.name == name
             && match b.module {

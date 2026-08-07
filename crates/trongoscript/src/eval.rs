@@ -403,10 +403,7 @@ fn dispatch_call(name: &str, arg_exprs: &[Expr], ctx: &mut Context) -> EvalResul
     // available whenever the `rng` module is enabled. The 2-arg form
     // with an explicit seed continues to dispatch through the stdlib
     // `strings` module as usual.
-    if name == "spintax"
-        && arg_exprs.len() == 1
-        && ctx.enabled_modules.contains("rng")
-    {
+    if name == "spintax" && arg_exprs.len() == 1 && ctx.enabled_modules.contains("rng") {
         return spintax_with_context_seed(arg_exprs, ctx);
     }
 
@@ -781,7 +778,17 @@ fn special_defn(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
 /// Globals stay live (so the closure sees `def`s installed after its
 /// creation), while lexical frames are restored from the snapshot taken
 /// at `(fn ...)` time.
-pub(crate) fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
+/// Invoke a previously-registered closure by its handle index.
+///
+/// Most callers want [`call_fn`], which accepts the function-handle [`Value`]
+/// that `(fn ...)` / `(defn ...)` evaluate to. This lower-level form takes the
+/// raw `handle` index into [`Context::fns`].
+///
+/// # Errors
+///
+/// Returns [`EvalError::Arity`] if `args` does not match the closure's
+/// parameter list, or [`EvalError::InvalidForm`] if `handle` is out of range.
+pub fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
     let closure = ctx
         .fns
         .get(handle)
@@ -830,6 +837,33 @@ pub(crate) fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> 
     ctx.scopes.truncate(1);
     ctx.scopes.extend(saved_lexical);
     result
+}
+
+/// Invoke a first-class function value with the given arguments.
+///
+/// `f` must be a function-handle [`Value`] — the kind produced by evaluating a
+/// `(fn ...)` or `(defn ...)` form. Host code that captures such a value (for
+/// example a predicate passed into a host builtin) can call it back through
+/// this function.
+///
+/// # Errors
+///
+/// Returns [`EvalError::Type`] if `f` is not a function value, plus any error
+/// raised while running the closure body (including arity mismatch).
+///
+/// # Examples
+///
+/// ```
+/// use trongoscript::{eval_source, call_fn, Context, EvalConfig, Value};
+///
+/// let mut ctx = Context::new(EvalConfig::default());
+/// let f = eval_source("(fn [x] (* x x))", &mut ctx).unwrap();
+/// let r = call_fn(&mut ctx, &f, &[Value::from(6)]).unwrap();
+/// assert_eq!(r, Value::from(36));
+/// ```
+pub fn call_fn(ctx: &mut Context, f: &Value, args: &[Value]) -> EvalResult<Value> {
+    let handle = coerce_to_fn("call_fn", f)?;
+    call_closure(handle, args, ctx)
 }
 
 pub(crate) fn coerce_to_fn(fname: &str, v: &Value) -> EvalResult<usize> {
@@ -1044,7 +1078,8 @@ fn special_macroexpand(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     // The argument is a *quoted* form: typically `(macroexpand '(my-macro x y))`.
     let target = match &args[0] {
         Expr::List(items)
-            if matches!(items.first(), Some(Expr::Symbol(s)) if s == "quote") && items.len() == 2 =>
+            if matches!(items.first(), Some(Expr::Symbol(s)) if s == "quote")
+                && items.len() == 2 =>
         {
             items[1].clone()
         }
@@ -1174,7 +1209,10 @@ fn substitute(
         Expr::Map(pairs) => {
             let mut out = Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
-                out.push((substitute(k, subs, ctx, depth)?, substitute(v, subs, ctx, depth)?));
+                out.push((
+                    substitute(k, subs, ctx, depth)?,
+                    substitute(v, subs, ctx, depth)?,
+                ));
             }
             Ok(Expr::Map(out))
         }
@@ -1409,7 +1447,9 @@ fn io_include(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let prev_dir = ctx.current_file_dir.take();
     ctx.current_file_dir = resolved.parent().map(|p| p.to_path_buf());
 
-    let result = source.map_err(EvalError::from).and_then(|s| eval_source(&s, ctx));
+    let result = source
+        .map_err(EvalError::from)
+        .and_then(|s| eval_source(&s, ctx));
 
     ctx.current_file_dir = prev_dir;
     ctx.includes.stack.pop();
@@ -1446,10 +1486,7 @@ fn io_glob(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let pattern = one_string_arg("glob", args, ctx)?;
     let sb = require_sandbox(ctx)?.clone();
     let matches = sb.glob(ctx.current_file_dir.as_deref(), &pattern)?;
-    let arr = matches
-        .into_iter()
-        .map(|m| Value::String(m.path))
-        .collect();
+    let arr = matches.into_iter().map(|m| Value::String(m.path)).collect();
     Ok(Value::Array(arr))
 }
 
@@ -1622,10 +1659,21 @@ fn partial_eval_list(
         // suspension boundary anyway.
         if matches!(
             name.as_str(),
-            "fn" | "defn" | "defmacro" | "macroexpand"
-                | "quote" | "quasiquote" | "unquote" | "unquote-splicing"
-                | "and" | "or" | "def"
-                | "include" | "read-file" | "list-files" | "glob" | "use"
+            "fn" | "defn"
+                | "defmacro"
+                | "macroexpand"
+                | "quote"
+                | "quasiquote"
+                | "unquote"
+                | "unquote-splicing"
+                | "and"
+                | "or"
+                | "def"
+                | "include"
+                | "read-file"
+                | "list-files"
+                | "glob"
+                | "use"
         ) {
             return eval(&Expr::List(items.to_vec()), ctx).map(Partial::Done);
         }
@@ -1775,7 +1823,11 @@ fn partial_eval_let(
     };
     let bindings = match bindings_expr {
         Expr::Vector(items) => items,
-        _ => return Err(EvalError::InvalidForm("let bindings must be a vector".into())),
+        _ => {
+            return Err(EvalError::InvalidForm(
+                "let bindings must be a vector".into(),
+            ))
+        }
     };
     if bindings.len() % 2 != 0 {
         return Err(EvalError::InvalidForm(
@@ -1883,6 +1935,5 @@ fn partial_eval_when(
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
-
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

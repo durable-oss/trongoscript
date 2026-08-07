@@ -139,14 +139,13 @@ fn arity_at_least(name: &str, lo: usize, actual: usize) -> EvalResult<()> {
 }
 
 /// Run a unary predicate closure, optionally inverting truthiness.
-fn pred_holds(
-    handle: usize,
-    value: &Value,
-    ctx: &mut Context,
-    invert: bool,
-) -> EvalResult<bool> {
-    let r = call_closure(handle, &[value.clone()], ctx)?;
-    Ok(if invert { !is_truthy(&r) } else { is_truthy(&r) })
+fn pred_holds(handle: usize, value: &Value, ctx: &mut Context, invert: bool) -> EvalResult<bool> {
+    let r = call_closure(handle, std::slice::from_ref(value), ctx)?;
+    Ok(if invert {
+        !is_truthy(&r)
+    } else {
+        is_truthy(&r)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +173,7 @@ fn mapc(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let handle = coerce_to_fn("mapc", &f)?;
     let items = coerce_to_list("mapc", &xs)?;
     for it in &items {
-        call_closure(handle, &[it.clone()], ctx)?;
+        call_closure(handle, std::slice::from_ref(it), ctx)?;
     }
     Ok(Value::Array(items))
 }
@@ -368,7 +367,11 @@ fn find_if(arg_exprs: &[Expr], ctx: &mut Context, invert: bool) -> EvalResult<Va
 }
 
 fn position_if(arg_exprs: &[Expr], ctx: &mut Context, invert: bool) -> EvalResult<Value> {
-    let fname = if invert { "position-if-not" } else { "position-if" };
+    let fname = if invert {
+        "position-if-not"
+    } else {
+        "position-if"
+    };
     arity_exact(fname, 2, arg_exprs.len())?;
     let f = eval(&arg_exprs[0], ctx)?;
     let xs = eval(&arg_exprs[1], ctx)?;
@@ -525,7 +528,11 @@ fn subst_walk(
 }
 
 fn substitute_if(arg_exprs: &[Expr], ctx: &mut Context, invert: bool) -> EvalResult<Value> {
-    let fname = if invert { "substitute-if-not" } else { "substitute-if" };
+    let fname = if invert {
+        "substitute-if-not"
+    } else {
+        "substitute-if"
+    };
     arity_exact(fname, 3, arg_exprs.len())?;
     let new_v = eval(&arg_exprs[0], ctx)?;
     let pred = eval(&arg_exprs[1], ctx)?;
@@ -680,12 +687,7 @@ enum SetOp {
     ExclusiveOr,
 }
 
-fn set_op(
-    arg_exprs: &[Expr],
-    ctx: &mut Context,
-    fname: &str,
-    op: SetOp,
-) -> EvalResult<Value> {
+fn set_op(arg_exprs: &[Expr], ctx: &mut Context, fname: &str, op: SetOp) -> EvalResult<Value> {
     arity_exact(fname, 2, arg_exprs.len())?;
     let a = eval(&arg_exprs[0], ctx)?;
     let b = eval(&arg_exprs[1], ctx)?;
