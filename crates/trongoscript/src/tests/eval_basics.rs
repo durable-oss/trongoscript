@@ -147,3 +147,39 @@ fn quasiquote_alone_works_as_data_literal() {
     assert_eq!(arr[2], Value::Number(3.into()));
     assert_eq!(arr[3], Value::Number(4.into()));
 }
+
+#[test]
+fn thread_first_threads_as_first_arg() {
+    // ((5 + 3) * 2) = 16
+    assert_eq!(eval_str("(-> 5 (+ 3) (* 2))"), Value::Number(16.into()));
+    // bare symbol step wraps as a single-arg call
+    assert_eq!(
+        eval_str("(use predicates) (-> 10 inc)"),
+        Value::Number(11.into())
+    );
+    // first arg position matters: (- 10 3) = 7
+    assert_eq!(eval_str("(-> 10 (- 3))"), Value::Number(7.into()));
+    // single value passes through
+    assert_eq!(eval_str("(-> 5)"), Value::Number(5.into()));
+}
+
+#[test]
+fn thread_last_threads_as_last_arg() {
+    // (1 - (100 - 5)) = -94
+    assert_eq!(eval_str("(->> 5 (- 100) (- 1))"), Value::Number((-94).into()));
+    // last arg position: (- 3 10) = -7
+    assert_eq!(eval_str("(->> 10 (- 3))"), Value::Number((-7).into()));
+}
+
+#[test]
+fn cons_and_list_builtins() {
+    let v = eval_str("(cons 1 (list 2 3))");
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert_eq!(arr[0], Value::Number(1.into()));
+    assert_eq!(arr[2], Value::Number(3.into()));
+
+    assert_eq!(eval_str("(list)"), Value::Array(vec![]));
+    assert_eq!(eval_str("(list? (list 1))"), Value::Bool(true));
+    assert_eq!(eval_str("(list? 5)"), Value::Bool(false));
+}

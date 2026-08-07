@@ -400,6 +400,8 @@ Special forms:
   (let [n v ...] body...)
   (if cond then else?)
   (when cond body...)
+  (-> x (f a) g ...)      ; thread x as first arg of each step
+  (->> x (f a) g ...)     ; thread x as last arg of each step
   (do expr...)
   (def name value)
   (defmacro name [params] body...)        ; & rest params supported

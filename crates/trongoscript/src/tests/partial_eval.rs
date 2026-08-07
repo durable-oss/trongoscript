@@ -629,3 +629,59 @@ fn first_class_fn_head_reduces() {
         10.0
     );
 }
+
+#[test]
+fn thread_first_fully_reduces_when_pure() {
+    let mut ctx = pe_ctx();
+    // No opaque forms: (-> 5 (+ 3) (* 2)) folds to 16.
+    assert_eq!(done_num(pe("(-> 5 (+ 3) (* 2))", &mut ctx, &opaque(&[]))), 16.0);
+}
+
+#[test]
+fn thread_first_threads_opaque_result_and_suspends() {
+    // (-> (run-activity :a) (+ 1)) must expand to (+ (run-activity :a) 1)
+    // and suspend, carrying the threaded opaque sub-form.
+    let mut ctx = pe_ctx();
+    let r = pe(
+        "(-> (run-activity :a) (+ 1))",
+        &mut ctx,
+        &opaque(&["run-activity"]),
+    );
+    if let Partial::Suspended(Expr::List(items)) = r {
+        assert_eq!(items[0], Expr::Symbol("+".into()));
+        assert_eq!(
+            items[1],
+            Expr::List(vec![
+                Expr::Symbol("run-activity".into()),
+                Expr::Keyword("a".into()),
+            ])
+        );
+        assert_eq!(items[2], Expr::Number(1.0));
+    } else {
+        panic!("expected Suspended(List(...))");
+    }
+}
+
+#[test]
+fn thread_last_threads_opaque_result_and_suspends() {
+    // (->> (run-activity :a) (- 100)) expands to (- 100 (run-activity :a)).
+    let mut ctx = pe_ctx();
+    let r = pe(
+        "(->> (run-activity :a) (- 100))",
+        &mut ctx,
+        &opaque(&["run-activity"]),
+    );
+    if let Partial::Suspended(Expr::List(items)) = r {
+        assert_eq!(items[0], Expr::Symbol("-".into()));
+        assert_eq!(items[1], Expr::Number(100.0));
+        assert_eq!(
+            items[2],
+            Expr::List(vec![
+                Expr::Symbol("run-activity".into()),
+                Expr::Keyword("a".into()),
+            ])
+        );
+    } else {
+        panic!("expected Suspended(List(...))");
+    }
+}
