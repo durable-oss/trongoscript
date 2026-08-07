@@ -79,6 +79,9 @@ pub use trongoscript_parser::{
     parse_expr, parse_expr_with, parse_module, parse_module_with, parse_template, Expr, Module,
     ParserOptions, ReaderMacroFn, ReaderMacroOutput, Template,
 };
+pub use trongoscript_stdlib::trongo_fmt::{
+    to_source as to_trongo_source, to_source_pretty as to_trongo_source_pretty,
+};
 pub use trongoscript_stdlib::{Builtin, BuiltinError, BuiltinResult, Value};
 pub use value::{fn_handle, is_function, make_fn_value};
 

@@ -1127,4 +1127,90 @@ fn set_operations() {
     assert_eq!(eval(r#"(set-exclusive-or [1 2 3] [2 3 4])"#), ints(&[1, 4]));
 }
 
+// ---------------------------------------------------------------------------
+// Emitting Trongoscript source (to_trongo_source) — the inverse of reading.
+// ---------------------------------------------------------------------------
+
+/// Emit `v` as Trongoscript, read it back, and return the result. Anything
+/// the emitter writes must be something the reader accepts, so this closes
+/// the loop that the emitter's own unit tests cannot.
+fn round_trip(v: &Value) -> Value {
+    let src = trongoscript::to_trongo_source(v);
+    eval(&src)
+}
+
+fn round_trip_pretty(v: &Value) -> Value {
+    let src = trongoscript::to_trongo_source_pretty(v);
+    eval(&src)
+}
+
+#[test]
+fn emitted_source_reparses_to_the_same_value() {
+    let cases = vec![
+        serde_json::json!(null),
+        serde_json::json!(true),
+        serde_json::json!(42),
+        serde_json::json!(-7),
+        serde_json::json!(3.25),
+        serde_json::json!("plain"),
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!([1, 2, 3]),
+        serde_json::json!({"a": 1, "b": [1, {"c": null}]}),
+    ];
+    for v in cases {
+        assert_eq!(round_trip(&v), v, "compact round trip failed for {v}");
+        assert_eq!(round_trip_pretty(&v), v, "pretty round trip failed for {v}");
+    }
+}
+
+#[test]
+fn emitted_strings_survive_escaping() {
+    let v = serde_json::json!({
+        "newline": "a\nb",
+        "tab": "a\tb",
+        "quote": "say \"hi\"",
+        "backslash": "a\\b",
+        "control": "a\u{1}b",
+        "unicode": "héllo 世界",
+        "empty": "",
+    });
+    assert_eq!(round_trip(&v), v);
+}
+
+#[test]
+fn emitted_keys_survive_quoting() {
+    // Keys that cannot be keywords must come back as the same strings.
+    let v = serde_json::json!({
+        "full name": 1,
+        "has:colon": 2,
+        "has{brace": 3,
+        "has;semi": 4,
+        "": 5,
+        "ok-key": 6,
+        "42": 7,
+    });
+    assert_eq!(round_trip(&v), v);
+}
+
+#[test]
+fn emitted_extreme_floats_survive() {
+    let v = serde_json::json!({
+        "big": 1e300,
+        "small": 1e-300,
+        "neg": -1e300,
+        "max": f64::MAX,
+    });
+    assert_eq!(round_trip(&v), v);
+}
+
+#[test]
+fn to_trongo_builtin_output_reparses() {
+    // The in-language path: parse JSON, emit Trongoscript, read it back.
+    let src = r#"(use serde) (to-trongo (parse-json "{\"a\":[1,2],\"b c\":null}"))"#;
+    let emitted = eval(src);
+    let text = emitted.as_str().expect("to-trongo returns a string");
+    assert_eq!(eval(text), serde_json::json!({"a": [1, 2], "b c": null}));
+}
+
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

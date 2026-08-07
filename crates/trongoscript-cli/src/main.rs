@@ -1,7 +1,7 @@
 //! Trongoscript CLI.
 //!
 //! Subcommands:
-//!   trongo eval [-i FILE] [--root DIR] [--format json|yaml|toml]
+//!   trongo eval [-i FILE] [--root DIR] [--format json|yaml|toml|trongo]
 //!     Evaluate a Trongoscript document and print the value.
 //!
 //!   trongo render [-i FILE] [--root DIR]
@@ -10,6 +10,11 @@
 //!   trongo embed --in FILE [--root DIR] [--format json|yaml|toml]
 //!     Walk a JSON/YAML/TOML file and substitute embedded Trongoscript
 //!     snippets in place.
+//!
+//!   trongo convert [-i FILE] [--from json|yaml|toml] [--to json|yaml|toml|trongo]
+//!     Convert a data document between formats without evaluating it.
+//!     Defaults to `--to trongo`, so `trongo convert -i config.yaml`
+//!     prints the equivalent Trongoscript literal.
 //!
 //! `--root DIR` activates the filesystem sandbox so scripts can use
 //! `include`, `read-file`, and `list-files`. Without it, those builtins
@@ -45,6 +50,8 @@ enum Command {
     Render(RenderArgs),
     /// Walk a JSON/YAML/TOML document and substitute embedded Trongoscript.
     Embed(EmbedArgs),
+    /// Convert a data document between formats without evaluating it.
+    Convert(ConvertArgs),
     /// Print the source language reference.
     Reference,
 }
@@ -67,8 +74,8 @@ struct EvalArgs {
     #[arg(long)]
     seed: Option<u64>,
     /// Output format.
-    #[arg(long, value_enum, default_value_t = Format::Json)]
-    format: Format,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    format: OutputFormat,
 }
 
 #[derive(Parser, Debug)]
@@ -101,11 +108,50 @@ struct EmbedArgs {
     seed: Option<u64>,
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+#[derive(Parser, Debug)]
+struct ConvertArgs {
+    /// Input document. Use `-` for stdin (the default if omitted).
+    #[arg(short = 'i', long = "in")]
+    input: Option<PathBuf>,
+    /// Input format. Defaults to the file extension; required for stdin.
+    #[arg(long, value_enum)]
+    from: Option<Format>,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Trongo)]
+    to: OutputFormat,
+    /// Indent nested collections instead of emitting one line. Only
+    /// affects `--to trongo`; the other formats are always pretty-printed.
+    #[arg(long)]
+    pretty: bool,
+}
+
+/// A format that can be both read and written.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Format {
     Json,
     Yaml,
     Toml,
+}
+
+/// A format that can be written. Trongoscript is emit-only here: reading it
+/// back is `eval`'s job, not a data-document parse.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Yaml,
+    Toml,
+    /// Trongoscript source text.
+    Trongo,
+}
+
+impl From<Format> for OutputFormat {
+    fn from(f: Format) -> Self {
+        match f {
+            Format::Json => OutputFormat::Json,
+            Format::Yaml => OutputFormat::Yaml,
+            Format::Toml => OutputFormat::Toml,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -114,6 +160,7 @@ fn main() -> Result<()> {
         Command::Eval(a) => cmd_eval(a),
         Command::Render(a) => cmd_render(a),
         Command::Embed(a) => cmd_embed(a),
+        Command::Convert(a) => cmd_convert(a),
         Command::Reference => {
             print_help();
             Ok(())
@@ -159,7 +206,22 @@ fn cmd_embed(a: EmbedArgs) -> Result<()> {
             evaluate_embedded(value, &mut ctx).map_err(|e| anyhow!("{}", e))?
         }
     };
-    write_value(&out, format)
+    write_value(&out, format.into())
+}
+
+/// Convert a data document between formats. No evaluation happens — this is
+/// a pure reformat, so an input containing Trongoscript snippets keeps them
+/// as the strings they are.
+fn cmd_convert(a: ConvertArgs) -> Result<()> {
+    let from = a
+        .from
+        .or_else(|| a.input.as_deref().and_then(guess_format_from_path))
+        .ok_or_else(|| {
+            anyhow!("could not infer input format from extension; pass --from json|yaml|toml")
+        })?;
+    let raw = read_source(a.input.as_deref())?;
+    let value = parse_document(&raw, from)?;
+    write_value_with(&value, a.to, a.pretty)
 }
 
 /// Split a `--mount VIRTUAL=HOST` argument. Splits on the *first* `=` so
@@ -244,17 +306,32 @@ fn parse_document(raw: &str, format: Format) -> Result<Value> {
     }
 }
 
-fn write_value(v: &Value, format: Format) -> Result<()> {
+fn write_value(v: &Value, format: OutputFormat) -> Result<()> {
+    write_value_with(v, format, false)
+}
+
+/// Write `v` in `format`. `pretty` only applies to Trongoscript output —
+/// the other three formats have a single canonical spelling here.
+fn write_value_with(v: &Value, format: OutputFormat, pretty: bool) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
     match format {
-        Format::Json => {
+        OutputFormat::Trongo => {
+            let s = if pretty {
+                trongoscript::to_trongo_source_pretty(v)
+            } else {
+                trongoscript::to_trongo_source(v)
+            };
+            stdout.write_all(s.as_bytes())?;
+            stdout.write_all(b"\n")?;
+        }
+        OutputFormat::Json => {
             serde_json::to_writer_pretty(&mut stdout, v)?;
             stdout.write_all(b"\n")?;
         }
-        Format::Yaml => {
+        OutputFormat::Yaml => {
             serde_yaml::to_writer(&mut stdout, v)?;
         }
-        Format::Toml => {
+        OutputFormat::Toml => {
             // TOML's root must be a table; flatten if needed.
             let table: toml::Value = serde_json::from_value(v.clone())
                 .and_then(|s: serde_json::Value| serde_json::from_value(s))
@@ -364,6 +441,7 @@ Optional stdlib modules (opt in with `(use ...)`):
   finance     pmt fv pv npv nper rate          ; Excel-style cashflow funcs
   serde       to-json to-yaml to-toml          ; 2nd arg true => pretty
               parse-json parse-yaml parse-toml
+              to-trongo                        ; value => Trongoscript text
               ; to-toml needs a map root; TOML has no null
   predicates  inc dec zero? pos? neg? even? odd? between? non-nil?
               coalesce default                 ; defined as macros
@@ -378,6 +456,9 @@ Examples:
   trongo render -i template.erb --root ./views
   trongo embed -i config.yaml --root .  # process !trongo snippets in YAML
   trongo eval --root ./bob --mount /tom=./tom -i main.trongo
+  trongo convert -i config.yaml         # YAML => Trongoscript literal
+  trongo convert -i data.json --pretty  # indented, one key per line
+  trongo convert -i x.toml --to yaml    # any format pair, no evaluation
 "#;
 
 fn print_help() {

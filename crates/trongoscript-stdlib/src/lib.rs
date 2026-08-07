@@ -36,6 +36,7 @@ pub mod math;
 pub mod numeric;
 pub mod serde_fmt;
 pub mod string;
+pub mod trongo_fmt;
 
 /// Kani proof harnesses and the pure kernels they verify. Present in normal
 /// builds only as a small set of `pub(crate)` helpers plus their drift

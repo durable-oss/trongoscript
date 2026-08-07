@@ -9,7 +9,13 @@
 //! (to-yaml   [1 2 3])       ; => "- 1\n- 2\n- 3\n"
 //! (to-toml   {:a 1})        ; => "a = 1\n"
 //! (parse-json "{\"a\":1}")  ; => {:a 1}
+//! (to-trongo (parse-json "{\"a\":1}"))  ; => "{:a 1}"
 //! ```
+//!
+//! `to-trongo` goes the other way from the parsers: it renders a value as
+//! Trongoscript source text, so a JSON, YAML, or TOML document can be
+//! converted into the equivalent Trongoscript literal. See
+//! [`crate::trongo_fmt`] for how keys, numbers, and layout are handled.
 //!
 //! The three formats do not describe the same set of values, so the edges
 //! are worth knowing:
@@ -56,6 +62,17 @@ fn to_json(args: &[Value]) -> BuiltinResult {
     };
     out.map(Value::String)
         .map_err(|e| failed("to-json", e.to_string()))
+}
+
+/// Emit Trongoscript source for a value — the inverse of reading one.
+/// Always succeeds: every value in the model has a literal spelling.
+fn to_trongo(args: &[Value]) -> BuiltinResult {
+    let out = if pretty_flag(args) {
+        crate::trongo_fmt::to_source_pretty(&args[0])
+    } else {
+        crate::trongo_fmt::to_source(&args[0])
+    };
+    Ok(Value::String(out))
 }
 
 fn to_yaml(args: &[Value]) -> BuiltinResult {
@@ -245,6 +262,7 @@ fn yaml_key(k: &serde_yaml::Value, path: &str) -> Result<String, BuiltinError> {
     }
 }
 
+inventory::submit! { Builtin::in_module(MODULE, "to-trongo",  1, 2, to_trongo) }
 inventory::submit! { Builtin::in_module(MODULE, "to-json",    1, 2, to_json) }
 inventory::submit! { Builtin::in_module(MODULE, "to-yaml",    1, 1, to_yaml) }
 inventory::submit! { Builtin::in_module(MODULE, "to-toml",    1, 2, to_toml) }
@@ -287,6 +305,49 @@ mod tests {
         assert_eq!(s(to_json(&[json!(null)]).unwrap()), "null");
         assert_eq!(s(to_json(&[json!("hi")]).unwrap()), r#""hi""#);
         assert_eq!(s(to_json(&[json!(1.5)]).unwrap()), "1.5");
+    }
+
+    // -- to-trongo ----------------------------------------------------------
+
+    #[test]
+    fn to_trongo_compact_by_default() {
+        let out = s(to_trongo(&[json!({"a": 1, "b": [1, 2]})]).unwrap());
+        assert_eq!(out, "{:a 1 :b [1 2]}");
+    }
+
+    #[test]
+    fn to_trongo_pretty_with_flag() {
+        let out = s(to_trongo(&[json!({"a": 1, "b": [1, 2]}), json!(true)]).unwrap());
+        assert_eq!(out, "{\n  :a 1\n  :b [1 2]\n}");
+    }
+
+    #[test]
+    fn to_trongo_false_flag_stays_compact() {
+        let out = s(to_trongo(&[json!({"a": [1, [2]]}), json!(false)]).unwrap());
+        assert_eq!(out, "{:a [1 [2]]}");
+    }
+
+    #[test]
+    fn to_trongo_handles_scalars_and_null() {
+        assert_eq!(s(to_trongo(&[json!(null)]).unwrap()), "nil");
+        assert_eq!(s(to_trongo(&[json!("hi")]).unwrap()), r#""hi""#);
+        assert_eq!(s(to_trongo(&[json!(1.5)]).unwrap()), "1.5");
+        assert_eq!(s(to_trongo(&[json!(42)]).unwrap()), "42");
+    }
+
+    #[test]
+    fn to_trongo_accepts_any_root_unlike_toml() {
+        // No root-shape restriction: a bare scalar or list is a valid form.
+        assert_eq!(s(to_trongo(&[json!([1, 2])]).unwrap()), "[1 2]");
+        assert_eq!(s(to_trongo(&[json!(true)]).unwrap()), "true");
+    }
+
+    #[test]
+    fn parsed_json_round_trips_into_trongo() {
+        let v = parse_json(&[json!(r#"{"full name":"a b","tags":["x"],"n":null}"#)]).unwrap();
+        let out = s(to_trongo(&[v]).unwrap());
+        // Key needs quoting, value keeps its space, null becomes nil.
+        assert_eq!(out, r#"{"full name" "a b" :n nil :tags ["x"]}"#);
     }
 
     // -- to-yaml ------------------------------------------------------------
