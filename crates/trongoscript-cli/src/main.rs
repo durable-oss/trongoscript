@@ -187,8 +187,8 @@ fn make_context(
 ) -> Result<Context> {
     let mut cfg = EvalConfig::default();
     if let Some(r) = root {
-        let mut sb = Sandbox::new(r)
-            .with_context(|| format!("opening sandbox root {}", r.display()))?;
+        let mut sb =
+            Sandbox::new(r).with_context(|| format!("opening sandbox root {}", r.display()))?;
         for spec in mounts {
             let (virtual_path, host) = parse_mount(spec)?;
             sb = sb
@@ -227,8 +227,7 @@ fn read_source(input: Option<&std::path::Path>) -> Result<String> {
             std::io::stdin().read_to_string(&mut buf)?;
             Ok(buf)
         }
-        Some(p) => std::fs::read_to_string(p)
-            .with_context(|| format!("reading {}", p.display())),
+        Some(p) => std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display())),
     }
 }
 
@@ -363,6 +362,9 @@ Optional stdlib modules (opt in with `(use ...)`):
   collections sort uniq sum avg flatten partition zip take drop frequencies
               pluck group-by
   finance     pmt fv pv npv nper rate          ; Excel-style cashflow funcs
+  serde       to-json to-yaml to-toml          ; 2nd arg true => pretty
+              parse-json parse-yaml parse-toml
+              ; to-toml needs a map root; TOML has no null
   predicates  inc dec zero? pos? neg? even? odd? between? non-nil?
               coalesce default                 ; defined as macros
   rng         rand rand-int choose dice-roll shuffle set-seed

@@ -65,18 +65,21 @@ pub mod value;
 mod verification;
 
 pub use embed::{
-    evaluate_embedded, evaluate_embedded_with, evaluate_embedded_yaml,
-    evaluate_embedded_yaml_with, DEFAULT_KEY, DEFAULT_PREFIX, DEFAULT_TAG,
+    evaluate_embedded, evaluate_embedded_with, evaluate_embedded_yaml, evaluate_embedded_yaml_with,
+    DEFAULT_KEY, DEFAULT_PREFIX, DEFAULT_TAG,
 };
 pub use error::{EvalError, EvalResult};
-pub use eval::{call_closure, call_fn, eval, eval_module, eval_source, partial_eval, value_to_expr, Closure, Context, EvalConfig, HostBuiltin, MacroDef, Partial};
-pub use value::{fn_handle, is_function, make_fn_value};
+pub use eval::{
+    call_closure, call_fn, eval, eval_module, eval_source, partial_eval, value_to_expr, Closure,
+    Context, EvalConfig, HostBuiltin, MacroDef, Partial,
+};
+pub use sandbox::{Mount, Sandbox, SandboxError, SandboxLimits};
+pub use template::{render, render_template};
 pub use trongoscript_parser::{
     parse_expr, parse_expr_with, parse_module, parse_module_with, parse_template, Expr, Module,
     ParserOptions, ReaderMacroFn, ReaderMacroOutput, Template,
 };
 pub use trongoscript_stdlib::{Builtin, BuiltinError, BuiltinResult, Value};
-pub use sandbox::{Mount, Sandbox, SandboxError, SandboxLimits};
-pub use template::{render, render_template};
+pub use value::{fn_handle, is_function, make_fn_value};
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

@@ -90,8 +90,14 @@ mod proofs {
     #[kani::unwind(24)]
     fn glob_empty_pattern_matches_only_empty_name() {
         let name = any_name();
-        assert!(!glob_match(&[], 0, &name, 0), "empty pattern matched a name");
-        assert!(glob_match(&[], 0, &[], 0), "empty pattern rejected the empty name");
+        assert!(
+            !glob_match(&[], 0, &name, 0),
+            "empty pattern matched a name"
+        );
+        assert!(
+            glob_match(&[], 0, &[], 0),
+            "empty pattern rejected the empty name"
+        );
     }
 
     /// A single `*` matches any name in the alphabet, including the empty
@@ -123,8 +129,14 @@ mod proofs {
     #[kani::unwind(24)]
     fn glob_question_mark_matches_exactly_one_byte() {
         let name = any_name();
-        assert!(glob_match(b"????", 0, &name, 0), "?*4 rejected a 4-byte name");
-        assert!(!glob_match(b"????", 0, &name[..3], 0), "?*4 matched 3 bytes");
+        assert!(
+            glob_match(b"????", 0, &name, 0),
+            "?*4 rejected a 4-byte name"
+        );
+        assert!(
+            !glob_match(b"????", 0, &name[..3], 0),
+            "?*4 matched 3 bytes"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -151,7 +163,10 @@ mod proofs {
         }
         let c: u8 = kani::any();
         if let Some((_matched, next)) = match_class(&pat, 0, c) {
-            assert!(next <= pat.len(), "match_class returned a position past the end");
+            assert!(
+                next <= pat.len(),
+                "match_class returned a position past the end"
+            );
             assert!(next > 0, "match_class did not advance");
         }
     }

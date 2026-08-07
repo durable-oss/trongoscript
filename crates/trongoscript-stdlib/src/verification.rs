@@ -219,7 +219,10 @@ mod proofs {
         if let Some(prod) = a.checked_div(g).and_then(|q| q.checked_mul(b)) {
             assert!(prod > 0, "lcm of two positives must be positive");
             assert!(prod % a == 0, "lcm is not a multiple of the first argument");
-            assert!(prod % b == 0, "lcm is not a multiple of the second argument");
+            assert!(
+                prod % b == 0,
+                "lcm is not a multiple of the second argument"
+            );
         }
     }
 
@@ -269,10 +272,8 @@ mod tests {
         let add = find_builtin("+").expect("`+` should be registered");
         let cases = [0.0f64, 1.0, -1.0, 2.5, -2.5, 1e18, -1e18];
         for n in cases {
-            let got = (add.func)(&[
-                Value::Number(serde_json::Number::from_f64(n).unwrap()),
-            ])
-            .unwrap();
+            let got =
+                (add.func)(&[Value::Number(serde_json::Number::from_f64(n).unwrap())]).unwrap();
             let mirrored = narrows_to_i64_as_written(n);
             match (&got, mirrored) {
                 (Value::Number(num), Some(i)) => {

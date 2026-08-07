@@ -401,10 +401,7 @@ fn dispatch_call(name: &str, arg_exprs: &[Expr], ctx: &mut Context) -> EvalResul
     // available whenever the `rng` module is enabled. The 2-arg form
     // with an explicit seed continues to dispatch through the stdlib
     // `strings` module as usual.
-    if name == "spintax"
-        && arg_exprs.len() == 1
-        && ctx.enabled_modules.contains("rng")
-    {
+    if name == "spintax" && arg_exprs.len() == 1 && ctx.enabled_modules.contains("rng") {
         return spintax_with_context_seed(arg_exprs, ctx);
     }
 
@@ -1023,7 +1020,8 @@ fn special_macroexpand(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     // The argument is a *quoted* form: typically `(macroexpand '(my-macro x y))`.
     let target = match &args[0] {
         Expr::List(items)
-            if matches!(items.first(), Some(Expr::Symbol(s)) if s == "quote") && items.len() == 2 =>
+            if matches!(items.first(), Some(Expr::Symbol(s)) if s == "quote")
+                && items.len() == 2 =>
         {
             items[1].clone()
         }
@@ -1153,7 +1151,10 @@ fn substitute(
         Expr::Map(pairs) => {
             let mut out = Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
-                out.push((substitute(k, subs, ctx, depth)?, substitute(v, subs, ctx, depth)?));
+                out.push((
+                    substitute(k, subs, ctx, depth)?,
+                    substitute(v, subs, ctx, depth)?,
+                ));
             }
             Ok(Expr::Map(out))
         }
@@ -1388,7 +1389,9 @@ fn io_include(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let prev_dir = ctx.current_file_dir.take();
     ctx.current_file_dir = resolved.parent().map(|p| p.to_path_buf());
 
-    let result = source.map_err(EvalError::from).and_then(|s| eval_source(&s, ctx));
+    let result = source
+        .map_err(EvalError::from)
+        .and_then(|s| eval_source(&s, ctx));
 
     ctx.current_file_dir = prev_dir;
     ctx.includes.stack.pop();
@@ -1425,10 +1428,7 @@ fn io_glob(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let pattern = one_string_arg("glob", args, ctx)?;
     let sb = require_sandbox(ctx)?.clone();
     let matches = sb.glob(ctx.current_file_dir.as_deref(), &pattern)?;
-    let arr = matches
-        .into_iter()
-        .map(|m| Value::String(m.path))
-        .collect();
+    let arr = matches.into_iter().map(|m| Value::String(m.path)).collect();
     Ok(Value::Array(arr))
 }
 
@@ -1593,10 +1593,21 @@ fn partial_eval_list(
         // suspension boundary anyway.
         if matches!(
             name.as_str(),
-            "fn" | "defn" | "defmacro" | "macroexpand"
-                | "quote" | "quasiquote" | "unquote" | "unquote-splicing"
-                | "and" | "or" | "def"
-                | "include" | "read-file" | "list-files" | "glob" | "use"
+            "fn" | "defn"
+                | "defmacro"
+                | "macroexpand"
+                | "quote"
+                | "quasiquote"
+                | "unquote"
+                | "unquote-splicing"
+                | "and"
+                | "or"
+                | "def"
+                | "include"
+                | "read-file"
+                | "list-files"
+                | "glob"
+                | "use"
         ) {
             return eval(&Expr::List(items.to_vec()), ctx).map(Partial::Done);
         }
@@ -1746,7 +1757,11 @@ fn partial_eval_let(
     };
     let bindings = match bindings_expr {
         Expr::Vector(items) => items,
-        _ => return Err(EvalError::InvalidForm("let bindings must be a vector".into())),
+        _ => {
+            return Err(EvalError::InvalidForm(
+                "let bindings must be a vector".into(),
+            ))
+        }
     };
     if bindings.len() % 2 != 0 {
         return Err(EvalError::InvalidForm(
@@ -1854,6 +1869,5 @@ fn partial_eval_when(
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
-
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
