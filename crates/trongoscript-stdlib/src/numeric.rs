@@ -2,22 +2,7 @@
 //!
 //! Arithmetic functions are variadic. Comparisons are binary.
 
-use crate::{expect_number, inventory, Builtin, BuiltinError, BuiltinResult, Value};
-
-/// Convert an `f64` to a JSON number, preferring an integer representation
-/// when the value has no fractional part and fits in `i64`.
-fn num_from_f64(n: f64) -> Value {
-    if !n.is_finite() {
-        return Value::Null;
-    }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        return Value::Number((n as i64).into());
-    }
-    match serde_json::Number::from_f64(n) {
-        Some(num) => Value::Number(num),
-        None => Value::Null,
-    }
-}
+use crate::{expect_number, inventory, num_from_f64, Builtin, BuiltinError, BuiltinResult, Value};
 
 fn add(args: &[Value]) -> BuiltinResult {
     if args.is_empty() {

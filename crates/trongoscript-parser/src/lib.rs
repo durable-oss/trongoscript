@@ -24,7 +24,7 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_while, take_while1, take_while_m_n},
     character::complete::{char as nom_char, one_of},
-    combinator::{cut, opt, recognize},
+    combinator::{cut, opt},
     error::VerboseError,
     multi::many0,
     sequence::{delimited, tuple},
@@ -421,7 +421,7 @@ fn string_form(input: &str) -> PResult<Expr> {
 }
 
 fn number_form(input: &str) -> PResult<Expr> {
-    let (after, raw) = recognize(tuple((
+    let (after, (_, _, frac, exp)) = tuple((
         opt(nom_char::<&str, VerboseError<&str>>('-')),
         take_while1(|c: char| c.is_ascii_digit()),
         opt(tuple((
@@ -433,7 +433,8 @@ fn number_form(input: &str) -> PResult<Expr> {
             opt(one_of::<&str, _, VerboseError<&str>>("+-")),
             take_while1(|c: char| c.is_ascii_digit()),
         ))),
-    )))(input)?;
+    ))(input)?;
+    let raw = &input[..input.len() - after.len()];
 
     if let Some(c) = after.chars().next() {
         if is_symbol_char(c) {
@@ -446,12 +447,22 @@ fn number_form(input: &str) -> PResult<Expr> {
         }
     }
 
+    // A literal with a fractional part or exponent is a float; a bare
+    // integer literal is an int unless it overflows i64, in which case it
+    // falls back to float (matching the range the old f64-only lexer
+    // accepted).
+    if frac.is_none() && exp.is_none() {
+        if let Ok(i) = raw.parse::<i64>() {
+            return Ok((after, Expr::Int(i)));
+        }
+    }
+
     let n: f64 = raw.parse().map_err(|_| {
         nom::Err::Failure(VerboseError {
             errors: vec![(input, nom::error::VerboseErrorKind::Context("bad number"))],
         })
     })?;
-    Ok((after, Expr::Number(n)))
+    Ok((after, Expr::Float(n)))
 }
 
 fn keyword_form(input: &str) -> PResult<Expr> {
@@ -496,8 +507,8 @@ mod tests {
 
     #[test]
     fn parses_atoms() {
-        assert_eq!(one("42"), Expr::Number(42.0));
-        assert_eq!(one("-3.25"), Expr::Number(-3.25));
+        assert_eq!(one("42"), Expr::Int(42));
+        assert_eq!(one("-3.25"), Expr::Float(-3.25));
         assert_eq!(one("nil"), Expr::Nil);
         assert_eq!(one("true"), Expr::Bool(true));
         assert_eq!(one("false"), Expr::Bool(false));
@@ -521,9 +532,9 @@ mod tests {
             one("(+ 1 2 3)"),
             Expr::List(vec![
                 Expr::Symbol("+".into()),
-                Expr::Number(1.0),
-                Expr::Number(2.0),
-                Expr::Number(3.0),
+                Expr::Int(1),
+                Expr::Int(2),
+                Expr::Int(3),
             ])
         );
     }
@@ -532,11 +543,7 @@ mod tests {
     fn parses_vector() {
         assert_eq!(
             one("[1 2 3]"),
-            Expr::Vector(vec![
-                Expr::Number(1.0),
-                Expr::Number(2.0),
-                Expr::Number(3.0),
-            ])
+            Expr::Vector(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)])
         );
     }
 
@@ -549,7 +556,7 @@ mod tests {
                 assert_eq!(pairs[0].0, Expr::Keyword("name".into()));
                 assert_eq!(pairs[0].1, Expr::String("alice".into()));
                 assert_eq!(pairs[1].0, Expr::Keyword("age".into()));
-                assert_eq!(pairs[1].1, Expr::Number(30.0));
+                assert_eq!(pairs[1].1, Expr::Int(30));
             }
             other => panic!("expected map, got {:?}", other),
         }
@@ -571,13 +578,13 @@ mod tests {
 
     #[test]
     fn skips_line_comments() {
-        assert_eq!(one("; comment\n42 ; trailing\n"), Expr::Number(42.0));
+        assert_eq!(one("; comment\n42 ; trailing\n"), Expr::Int(42));
     }
 
     #[test]
     fn handles_discard_comment() {
         let m = parse_module("1 #_ 2 3").unwrap();
-        assert_eq!(m.forms, vec![Expr::Number(1.0), Expr::Number(3.0)]);
+        assert_eq!(m.forms, vec![Expr::Int(1), Expr::Int(3)]);
     }
 
     #[test]
@@ -688,7 +695,7 @@ mod tests {
 
     #[test]
     fn negative_number_vs_minus_symbol() {
-        assert_eq!(one("-5"), Expr::Number(-5.0));
+        assert_eq!(one("-5"), Expr::Int(-5));
         assert_eq!(one("-"), Expr::Symbol("-".into()));
     }
 

@@ -14,26 +14,33 @@
 //! heap — so the harnesses target the numeric kernels those builtins wrap.
 
 // ---------------------------------------------------------------------------
-// Mirrors of the private kernels under test.
+// Mirror of the kernel under test.
 //
-// The originals are `fn` items private to their modules and duplicated
-// across `numeric`, `math`, `finance`, `collection`, and `extra_collection`.
-// Rather than widen their visibility for verification, we restate them here
-// and keep them in sync; `kani_mirror_matches_numeric` in the unit tests
-// pins the behavior so drift is caught by `cargo test`, not just by Kani.
+// `num_from_f64` now lives once, at the crate root (`lib.rs`), and every
+// module that used to carry a private copy imports it from there. This
+// mirror restates that single implementation for Kani, which cannot reach
+// into `pub fn`s guarded by `#[cfg(kani)]`-incompatible dependencies (the
+// `serde_json::Number` allocation the real function performs on its
+// non-narrowing path is out of scope for the model checker); the unit test
+// `kani_mirror_matches_numeric` pins the two in sync so drift is caught by
+// `cargo test`, not just by Kani.
 // ---------------------------------------------------------------------------
 
-/// Byte-for-byte copy of the `num_from_f64` integer-narrowing predicate as
-/// written in `numeric.rs`, `math.rs`, `finance.rs`, `collection.rs`, and
-/// `extra_collection.rs`.
+/// Byte-for-byte copy of the integer-narrowing branch of
+/// [`crate::num_from_f64`].
 ///
-/// Returns `Some(i)` when the shipped code would take the `i64` branch.
+/// Returns `Some(i)` when the shipped code would take the `i64` branch. The
+/// upper bound is a strict `<` against `2^63`: `i64::MAX as f64` rounds up
+/// to exactly `2^63`, one past the true maximum `i64`, so a non-strict `<=`
+/// would let `2^63` through and `n as i64` would silently saturate it to
+/// `i64::MAX`.
 #[cfg(any(kani, test))]
 pub(crate) fn narrows_to_i64_as_written(n: f64) -> Option<i64> {
+    const I64_MAX_AS_F64_UPPER_BOUND: f64 = 9_223_372_036_854_775_808.0; // 2^63
     if !n.is_finite() {
         return None;
     }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+    if n.fract() == 0.0 && n >= i64::MIN as f64 && n < I64_MAX_AS_F64_UPPER_BOUND {
         return Some(n as i64);
     }
     None
@@ -74,23 +81,19 @@ mod proofs {
     // cost.
     // -----------------------------------------------------------------
 
-    /// The exact statement of the bug: 2^63 is a finite `f64` whose `fract()`
-    /// is zero and which satisfies the shipped guard `n <= i64::MAX as f64`,
-    /// because `i64::MAX as f64` rounds *up* to 2^63. The subsequent
-    /// `n as i64` then saturates to `i64::MAX`, so the "integer" branch
-    /// silently returns a different number than it was given.
+    /// 2^63 is a finite `f64` whose `fract()` is zero, so it is exactly the
+    /// value a non-strict `n <= i64::MAX as f64` guard would wrongly admit
+    /// (`i64::MAX as f64` rounds *up* to 2^63). The strict `<` bound must
+    /// reject it instead of letting `n as i64` saturate it to `i64::MAX`.
     ///
     /// No symbolic float at all — this is a concrete witness, so it is cheap.
-    /// Expected to FAIL against the code as written.
     #[kani::proof]
     fn narrowing_rejects_two_pow_63() {
         let two_pow_63 = 9_223_372_036_854_775_808.0f64; // i64::MAX + 1
-        if let Some(i) = narrows_to_i64_as_written(two_pow_63) {
-            assert!(
-                i as f64 == two_pow_63,
-                "num_from_f64 narrowed 2^63 to an i64 and changed its value"
-            );
-        }
+        assert!(
+            narrows_to_i64_as_written(two_pow_63).is_none(),
+            "num_from_f64 must reject 2^63, not saturate it into i64::MAX"
+        );
     }
 
     /// Round-trip over the symbolic *integer* domain: every `i64` that
@@ -109,9 +112,8 @@ mod proofs {
         }
     }
 
-    /// The corrected predicate uses a *strict* comparison against 2^63
-    /// instead of `n <= i64::MAX as f64`. Prove the fix admits 2^63 - 1024
-    /// (the largest `f64` below the boundary) and rejects 2^63 itself.
+    /// The predicate's strict comparison against 2^63 admits the largest
+    /// `f64` below the boundary and rejects 2^63 itself.
     #[kani::proof]
     fn corrected_upper_bound_is_exclusive() {
         const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
@@ -119,13 +121,16 @@ mod proofs {
         let just_below = 9_223_372_036_854_774_784.0f64;
 
         assert!(just_below < TWO_POW_63, "witness is not below the boundary");
+        match narrows_to_i64_as_written(just_below) {
+            Some(i) => assert!(
+                i as f64 == just_below,
+                "the largest in-range f64 must narrow losslessly"
+            ),
+            None => panic!("the largest f64 below 2^63 must be admitted"),
+        }
         assert!(
-            (just_below as i64) as f64 == just_below,
-            "the largest in-range f64 must narrow losslessly"
-        );
-        assert!(
-            !(TWO_POW_63 < TWO_POW_63),
-            "the corrected strict bound must exclude 2^63"
+            narrows_to_i64_as_written(TWO_POW_63).is_none(),
+            "the strict bound must exclude 2^63"
         );
     }
 

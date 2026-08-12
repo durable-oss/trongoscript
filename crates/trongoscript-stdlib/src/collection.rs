@@ -1,19 +1,9 @@
 //! Collection (list / map) builtins.
 
-use crate::{expect_array, expect_object, inventory, Builtin, BuiltinError, BuiltinResult, Value};
-
-fn num_from_f64(n: f64) -> Value {
-    if !n.is_finite() {
-        return Value::Null;
-    }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        return Value::Number((n as i64).into());
-    }
-    match serde_json::Number::from_f64(n) {
-        Some(num) => Value::Number(num),
-        None => Value::Null,
-    }
-}
+use crate::{
+    expect_array, expect_object, inventory, num_from_f64, Builtin, BuiltinError, BuiltinResult,
+    Value,
+};
 
 fn count(args: &[Value]) -> BuiltinResult {
     let n = match &args[0] {

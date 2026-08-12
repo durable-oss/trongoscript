@@ -226,7 +226,7 @@ fn opaque_form_folds_pure_args() {
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("run-activity".into()));
         assert_eq!(items[1], Expr::Keyword("task".into()));
-        assert_eq!(items[2], Expr::Number(3.0));
+        assert_eq!(items[2], Expr::Int(3));
     } else {
         panic!("expected Suspended(List(...))");
     }
@@ -299,7 +299,7 @@ fn list_pure_args_folded_in_residual() {
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("+".into()));
         assert!(matches!(&items[1], Expr::List(_)));
-        assert_eq!(items[2], Expr::Number(12.0));
+        assert_eq!(items[2], Expr::Int(12));
     } else {
         panic!("expected Suspended(List(...))");
     }
@@ -380,8 +380,8 @@ fn if_suspended_condition_folds_pure_branches() {
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("if".into()));
         assert!(matches!(&items[1], Expr::List(_))); // suspended condition
-        assert_eq!(items[2], Expr::Number(9.0)); // then folded
-        assert_eq!(items[3], Expr::Number(2.0)); // else folded
+        assert_eq!(items[2], Expr::Int(9)); // then folded
+        assert_eq!(items[3], Expr::Int(2)); // else folded
     } else {
         panic!("expected Suspended(List(if ...))");
     }
@@ -408,7 +408,7 @@ fn if_suspended_condition_opaque_then_pure_else() {
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::List(items)) = r {
         assert!(matches!(&items[2], Expr::List(_))); // then still suspended
-        assert_eq!(items[3], Expr::Number(0.0)); // else folded
+        assert_eq!(items[3], Expr::Int(0)); // else folded
     } else {
         panic!("expected Suspended");
     }
@@ -466,9 +466,9 @@ fn vector_with_opaque_child_suspends_and_folds_pure() {
     let expr = trongoscript_parser::parse_expr("[(+ 1 2) (run-activity :x) 10]").unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::Vector(items)) = r {
-        assert_eq!(items[0], Expr::Number(3.0));
+        assert_eq!(items[0], Expr::Int(3));
         assert!(matches!(&items[1], Expr::List(_)));
-        assert_eq!(items[2], Expr::Number(10.0));
+        assert_eq!(items[2], Expr::Int(10));
     } else {
         panic!("expected Suspended(Vector(...))");
     }
@@ -516,7 +516,7 @@ fn map_with_suspended_value_suspends_and_folds_pure() {
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::Map(pairs)) = r {
         assert!(matches!(&pairs[0].1, Expr::List(_))); // :result still opaque
-        assert_eq!(pairs[1].1, Expr::Number(3.0)); // :count folded
+        assert_eq!(pairs[1].1, Expr::Int(3)); // :count folded
     } else {
         panic!("expected Suspended(Map(...))");
     }
@@ -656,7 +656,7 @@ fn thread_first_threads_opaque_result_and_suspends() {
                 Expr::Keyword("a".into()),
             ])
         );
-        assert_eq!(items[2], Expr::Number(1.0));
+        assert_eq!(items[2], Expr::Int(1));
     } else {
         panic!("expected Suspended(List(...))");
     }
@@ -673,7 +673,7 @@ fn thread_last_threads_opaque_result_and_suspends() {
     );
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("-".into()));
-        assert_eq!(items[1], Expr::Number(100.0));
+        assert_eq!(items[1], Expr::Int(100));
         assert_eq!(
             items[2],
             Expr::List(vec![

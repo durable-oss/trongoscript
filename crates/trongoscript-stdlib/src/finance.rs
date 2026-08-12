@@ -9,22 +9,9 @@
 //! optional, default 0) selects end-of-period (0) vs. beginning-of-period
 //! (1) payments.
 
-use crate::{expect_number, inventory, Builtin, BuiltinError, BuiltinResult, Value};
+use crate::{expect_number, inventory, num_from_f64, Builtin, BuiltinError, BuiltinResult, Value};
 
 const MODULE: &str = "finance";
-
-fn num_from_f64(n: f64) -> Value {
-    if !n.is_finite() {
-        return Value::Null;
-    }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        return Value::Number((n as i64).into());
-    }
-    match serde_json::Number::from_f64(n) {
-        Some(num) => Value::Number(num),
-        None => Value::Null,
-    }
-}
 
 fn opt_arg(args: &[Value], i: usize, default: f64, fname: &str) -> Result<f64, BuiltinError> {
     if i < args.len() {

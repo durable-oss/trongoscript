@@ -240,7 +240,8 @@ pub fn eval(expr: &Expr, ctx: &mut Context) -> EvalResult<Value> {
     match expr {
         Expr::Nil => Ok(Value::Null),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Number(n) => Ok(crate::value::num_from_f64(*n)),
+        Expr::Int(n) => Ok(Value::Number((*n).into())),
+        Expr::Float(n) => Ok(crate::value::num_from_f64(*n)),
         Expr::String(s) => Ok(Value::String(s.clone())),
         // Keywords evaluate to their string name. This keeps the data model
         // JSON-shaped.
@@ -482,7 +483,8 @@ fn quote_to_value(e: &Expr) -> Value {
     match e {
         Expr::Nil => Value::Null,
         Expr::Bool(b) => Value::Bool(*b),
-        Expr::Number(n) => crate::value::num_from_f64(*n),
+        Expr::Int(n) => Value::Number((*n).into()),
+        Expr::Float(n) => crate::value::num_from_f64(*n),
         Expr::String(s) | Expr::Keyword(s) | Expr::Symbol(s) => Value::String(s.clone()),
         Expr::Vector(items) | Expr::List(items) => {
             Value::Array(items.iter().map(quote_to_value).collect())
@@ -1346,9 +1348,9 @@ pub fn value_to_expr(v: &Value) -> Expr {
         Value::Bool(b) => Expr::Bool(*b),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Expr::Number(i as f64)
+                Expr::Int(i)
             } else if let Some(f) = n.as_f64() {
-                Expr::Number(f)
+                Expr::Float(f)
             } else {
                 Expr::Nil
             }
@@ -1528,9 +1530,12 @@ pub fn partial_eval(
 ) -> EvalResult<Partial> {
     match expr {
         // Atoms and self-evaluating forms: reduce fully.
-        Expr::Nil | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Keyword(_) => {
-            eval(expr, ctx).map(Partial::Done)
-        }
+        Expr::Nil
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Keyword(_) => eval(expr, ctx).map(Partial::Done),
 
         // Symbol: resolve; if undefined this is an error, not a suspension.
         Expr::Symbol(_) => eval(expr, ctx).map(Partial::Done),

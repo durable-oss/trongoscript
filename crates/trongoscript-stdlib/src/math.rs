@@ -3,22 +3,12 @@
 //! Activated by `(use math)`. Everything here is pure computation: no
 //! clock access, no RNG, no I/O. Safe to expose under any sandbox.
 
-use crate::{expect_number, expect_string, inventory, Builtin, BuiltinError, BuiltinResult, Value};
+use crate::{
+    expect_number, expect_string, inventory, num_from_f64, Builtin, BuiltinError, BuiltinResult,
+    Value,
+};
 
 const MODULE: &str = "math";
-
-fn num_from_f64(n: f64) -> Value {
-    if !n.is_finite() {
-        return Value::Null;
-    }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        return Value::Number((n as i64).into());
-    }
-    match serde_json::Number::from_f64(n) {
-        Some(num) => Value::Number(num),
-        None => Value::Null,
-    }
-}
 
 fn sqrt(args: &[Value]) -> BuiltinResult {
     let x = expect_number("sqrt", &args[0])?;

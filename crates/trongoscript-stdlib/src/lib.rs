@@ -43,6 +43,28 @@ pub mod trongo_fmt;
 /// tests; the proofs themselves are `cfg(kani)`.
 mod verification;
 
+/// Convert an `f64` to a JSON number, preferring an integer representation
+/// when the value has no fractional part and fits in `i64`. Returns
+/// `Value::Null` for `NaN` and infinities (which JSON cannot represent).
+///
+/// The upper bound check is strict (`<`, not `<=`): `i64::MAX as f64`
+/// rounds up to exactly `2^63`, one past the actual maximum `i64`, so a
+/// non-strict comparison would let `2^63` through and silently saturate it
+/// to `i64::MAX` on the cast below.
+pub fn num_from_f64(n: f64) -> Value {
+    if !n.is_finite() {
+        return Value::Null;
+    }
+    const I64_MAX_AS_F64_UPPER_BOUND: f64 = 9_223_372_036_854_775_808.0; // 2^63
+    if n.fract() == 0.0 && n >= i64::MIN as f64 && n < I64_MAX_AS_F64_UPPER_BOUND {
+        return Value::Number((n as i64).into());
+    }
+    match serde_json::Number::from_f64(n) {
+        Some(num) => Value::Number(num),
+        None => Value::Null,
+    }
+}
+
 /// Result type for builtin functions.
 pub type BuiltinResult = Result<Value, BuiltinError>;
 
