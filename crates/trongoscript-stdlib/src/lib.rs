@@ -1,9 +1,20 @@
 //! Trongoscript standard library.
 //!
-//! Builtins are registered via the [`inventory`] crate's compile-time
-//! distributed slice. The evaluator looks up functions by name at runtime,
-//! and host programs (CLI or library callers) can add their own builtins
-//! the same way:
+//! The evaluator looks builtins up by name at runtime, against two
+//! registries that [`iter_builtins`] presents as one.
+//!
+//! **This crate's own builtins** live in a `BUILTINS` slice per module,
+//! gathered into `CRATE_BUILTINS`. That is not stylistic: `inventory`
+//! registers through a link section populated by constructors, and on
+//! `wasm32-unknown-unknown` nothing references these functions by name, so
+//! the linker drops them as dead code before the constructors that would
+//! have registered them ever run. The symptom is every document failing with
+//! "undefined function `str`" on a target where the build succeeded and
+//! nothing looks wrong. Naming them in ordinary statics keeps them alive
+//! everywhere.
+//!
+//! **Host builtins** still come in through [`inventory`], which remains the
+//! extension point for a program embedding the language:
 //!
 //! ```ignore
 //! use trongoscript_stdlib::{Builtin, BuiltinResult, Value};
@@ -17,9 +28,14 @@
 //! }
 //! ```
 //!
-//! The set of "io" builtins (`include`, `read_file`, `list_files`) is
-//! intentionally **not** in this crate — those need access to the
-//! sandboxed FS root, which lives in the evaluator.
+//! A host targeting wasm should expect the same dead-code problem with its
+//! own submissions, and pass its builtins to the evaluator directly instead.
+//!
+//! Two sets of functions are deliberately *not* here. The "io" builtins
+//! (`include`, `read_file`, `list_files`) need the sandboxed filesystem
+//! root, which lives in the evaluator. So do the higher-order forms (`map`,
+//! `filter`, `reduce`), which take unevaluated expressions and so are
+//! dispatched by the evaluator rather than registered as values.
 
 pub use inventory;
 pub use serde_json::Value;
@@ -152,22 +168,42 @@ impl fmt::Debug for Builtin {
 
 inventory::collect!(Builtin);
 
+/// Every builtin this crate ships, as plain static slices.
+///
+/// This, rather than the `inventory::submit!` calls beside each definition,
+/// is what makes the standard library work on `wasm32-unknown-unknown`.
+/// Inventory registers through a link section populated by constructors, and
+/// in a wasm build nothing references these functions by name — so the
+/// linker drops them as dead code before the constructors that would have
+/// registered them ever run, and every document fails with "undefined
+/// function `str`" on a target where nothing looks wrong.
+///
+/// Naming them in ordinary statics keeps them alive on every target and
+/// makes registration an array walk. The inventory path stays alongside it,
+/// because a *host* adding its own builtins with `inventory::submit!` is a
+/// documented extension point and native builds still honor it.
+static CRATE_BUILTINS: &[&[Builtin]] = &[
+    collection::BUILTINS,
+    extra_collection::BUILTINS,
+    extra_string::BUILTINS,
+    finance::BUILTINS,
+    logic::BUILTINS,
+    math::BUILTINS,
+    numeric::BUILTINS,
+    string::BUILTINS,
+];
+
 /// Look up a builtin by name, ignoring module visibility. O(N) over the
 /// registry. Prefer [`find_builtin_for`] when visibility matters.
 pub fn find_builtin(name: &str) -> Option<&'static Builtin> {
-    inventory::iter::<Builtin>
-        .into_iter()
-        .find(|b| b.name == name)
+    iter_builtins().find(|b| b.name == name)
 }
 
 /// Look up a builtin by name, honoring module visibility. Core builtins
 /// (`module == None`) always resolve; module-scoped builtins resolve only
 /// when `is_enabled(module_name)` returns true.
-pub fn find_builtin_for(
-    name: &str,
-    is_enabled: impl Fn(&str) -> bool,
-) -> Option<&'static Builtin> {
-    inventory::iter::<Builtin>.into_iter().find(|b| {
+pub fn find_builtin_for(name: &str, is_enabled: impl Fn(&str) -> bool) -> Option<&'static Builtin> {
+    iter_builtins().find(|b| {
         b.name == name
             && match b.module {
                 None => true,
@@ -176,9 +212,31 @@ pub fn find_builtin_for(
     })
 }
 
-/// Iterate over every registered builtin.
+/// Iterate over every registered builtin: this crate's, then any a host
+/// submitted through inventory.
+///
+/// The crate's own builtins are yielded first, so a host submitting a name
+/// that already exists shadows nothing — lookups find the standard one. That
+/// is the conservative choice; a host that wants to *replace* a builtin
+/// should say so through a mechanism that can't happen by accident.
+///
+/// On a native target the crate's builtins appear in the inventory registry
+/// too, so this deduplicates by identity to keep the sequence honest.
 pub fn iter_builtins() -> impl Iterator<Item = &'static Builtin> {
-    inventory::iter::<Builtin>.into_iter()
+    let own = CRATE_BUILTINS.iter().copied().flatten();
+    let submitted = inventory::iter::<Builtin>
+        .into_iter()
+        .filter(|b| !is_own(b));
+    own.chain(submitted)
+}
+
+/// Is this inventory entry one of the crate's own, registered twice?
+fn is_own(candidate: &'static Builtin) -> bool {
+    CRATE_BUILTINS
+        .iter()
+        .copied()
+        .flatten()
+        .any(|b| b.name == candidate.name && b.module == candidate.module)
 }
 
 /// Iterate over every module name referenced by a registered builtin.
@@ -260,6 +318,50 @@ mod tests {
     fn registry_lists_many_builtins() {
         let count = iter_builtins().count();
         assert!(count > 10, "expected >10 builtins, got {count}");
+    }
+
+    #[test]
+    fn every_module_slice_is_reachable_without_inventory() {
+        // The point of `CRATE_BUILTINS` is that the standard library works on
+        // targets where inventory's link-section registration does not — on
+        // wasm32 the constructors never run, the functions are dropped as
+        // dead code, and every document fails with "undefined function
+        // `str`". Walking the slices directly is what a wasm build does, so
+        // check the slices rather than the merged iterator.
+        let names: Vec<&str> = CRATE_BUILTINS
+            .iter()
+            .copied()
+            .flatten()
+            .map(|b| b.name)
+            .collect();
+
+        // Names this crate owns. `map` and the other higher-order forms are
+        // deliberately absent: the evaluator dispatches those by `match`
+        // rather than registering them, so they were never affected.
+        for expected in ["str", "upcase", "abs", "not", "count"] {
+            assert!(
+                names.contains(&expected),
+                "`{expected}` is missing from the static slices, so it would \
+                 not exist on wasm32"
+            );
+        }
+        assert!(
+            names.len() >= 100,
+            "expected the whole stdlib, got {}",
+            names.len()
+        );
+    }
+
+    #[test]
+    fn a_builtin_is_not_listed_twice_when_inventory_also_has_it() {
+        // Natively, every one of the crate's builtins is registered both ways.
+        // The dedup in `iter_builtins` is what keeps `known_modules` and any
+        // caller counting builtins from seeing each one twice.
+        let mut names: Vec<&str> = iter_builtins().map(|b| b.name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(total, names.len(), "a builtin appeared more than once");
     }
 }
 

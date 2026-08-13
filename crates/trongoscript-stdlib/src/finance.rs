@@ -186,6 +186,26 @@ fn rate(args: &[Value]) -> BuiltinResult {
     })
 }
 
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::in_module(MODULE, "pmt", 3, 5, pmt),
+    Builtin::in_module(MODULE, "fv", 3, 5, fv),
+    Builtin::in_module(MODULE, "pv", 3, 5, pv),
+    Builtin::in_module_variadic(MODULE, "npv", npv),
+    Builtin::in_module(MODULE, "nper", 3, 5, nper),
+    Builtin::in_module(MODULE, "rate", 3, 6, rate),
+];
+
 inventory::submit! { Builtin::in_module(MODULE, "pmt",  3, 5, pmt) }
 inventory::submit! { Builtin::in_module(MODULE, "fv",   3, 5, fv) }
 inventory::submit! { Builtin::in_module(MODULE, "pv",   3, 5, pv) }

@@ -27,11 +27,10 @@ fn num_from_f64(n: f64) -> Value {
 fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => {
-            x.as_f64().and_then(|f| y.as_f64().map(|g| (f, g))).and_then(
-                |(f, g)| f.partial_cmp(&g),
-            )
-        }
+        (Value::Number(x), Value::Number(y)) => x
+            .as_f64()
+            .and_then(|f| y.as_f64().map(|g| (f, g)))
+            .and_then(|(f, g)| f.partial_cmp(&g)),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
         (Value::Null, Value::Null) => Some(Ordering::Equal),
@@ -50,11 +49,7 @@ fn sort(args: &[Value]) -> BuiltinResult {
             if cmp_err.is_none() {
                 cmp_err = Some(BuiltinError::Failed {
                     function: "sort".into(),
-                    message: format!(
-                        "cannot compare {} with {}",
-                        type_name(x),
-                        type_name(y)
-                    ),
+                    message: format!("cannot compare {} with {}", type_name(x), type_name(y)),
                 });
             }
             std::cmp::Ordering::Equal
@@ -138,10 +133,7 @@ fn partition(args: &[Value]) -> BuiltinResult {
         });
     }
     let n = n as usize;
-    let out: Vec<Value> = a
-        .chunks(n)
-        .map(|c| Value::Array(c.to_vec()))
-        .collect();
+    let out: Vec<Value> = a.chunks(n).map(|c| Value::Array(c.to_vec())).collect();
     Ok(Value::Array(out))
 }
 
@@ -252,6 +244,32 @@ fn group_by(args: &[Value]) -> BuiltinResult {
     }
     Ok(Value::Object(out))
 }
+
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::in_module(MODULE, "sort", 1, 1, sort),
+    Builtin::in_module(MODULE, "uniq", 1, 1, uniq),
+    Builtin::in_module(MODULE, "sum", 1, 1, sum),
+    Builtin::in_module(MODULE, "avg", 1, 1, avg),
+    Builtin::in_module(MODULE, "flatten", 1, 1, flatten),
+    Builtin::in_module(MODULE, "partition", 2, 2, partition),
+    Builtin::in_module(MODULE, "zip", 2, 2, zip),
+    Builtin::in_module(MODULE, "take", 2, 2, take),
+    Builtin::in_module(MODULE, "drop", 2, 2, drop_n),
+    Builtin::in_module(MODULE, "frequencies", 1, 1, frequencies),
+    Builtin::in_module(MODULE, "pluck", 2, 2, pluck),
+    Builtin::in_module(MODULE, "group-by", 2, 2, group_by),
+];
 
 inventory::submit! { Builtin::in_module(MODULE, "sort",        1, 1, sort) }
 inventory::submit! { Builtin::in_module(MODULE, "uniq",        1, 1, uniq) }

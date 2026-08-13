@@ -31,10 +31,7 @@ fn trim(args: &[Value]) -> BuiltinResult {
 fn split(args: &[Value]) -> BuiltinResult {
     let s = expect_string("split", &args[0])?;
     let sep = expect_string("split", &args[1])?;
-    let parts: Vec<Value> = s
-        .split(sep)
-        .map(|p| Value::String(p.to_string()))
-        .collect();
+    let parts: Vec<Value> = s.split(sep).map(|p| Value::String(p.to_string())).collect();
     Ok(Value::Array(parts))
 }
 
@@ -136,6 +133,33 @@ fn substr(args: &[Value]) -> BuiltinResult {
     let out: String = chars[start..end].iter().collect();
     Ok(Value::String(out))
 }
+
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::new("upcase", 1, 1, upcase),
+    Builtin::new("downcase", 1, 1, downcase),
+    Builtin::new("capitalize", 1, 1, capitalize),
+    Builtin::new("trim", 1, 1, trim),
+    Builtin::new("split", 2, 2, split),
+    Builtin::new("join", 2, 2, join),
+    Builtin::new("replace", 3, 3, replace),
+    Builtin::new("str-len", 1, 1, str_len),
+    Builtin::variadic("str", str_concat),
+    Builtin::new("starts-with?", 2, 2, starts_with),
+    Builtin::new("ends-with?", 2, 2, ends_with),
+    Builtin::new("contains-str?", 2, 2, contains_str),
+    Builtin::new("substr", 2, 3, substr),
+];
 
 inventory::submit! { Builtin::new("upcase",        1, 1, upcase) }
 inventory::submit! { Builtin::new("downcase",      1, 1, downcase) }

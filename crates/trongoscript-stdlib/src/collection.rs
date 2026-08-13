@@ -235,6 +235,35 @@ fn contains_q(args: &[Value]) -> BuiltinResult {
     }
 }
 
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::new("count", 1, 1, count),
+    Builtin::new("first", 1, 1, first),
+    Builtin::new("last", 1, 1, last),
+    Builtin::new("rest", 1, 1, rest),
+    Builtin::new("nth", 2, 2, nth),
+    Builtin::variadic("conj", conj),
+    Builtin::variadic("concat", concat),
+    Builtin::new("reverse", 1, 1, reverse),
+    Builtin::new("range", 1, 3, range),
+    Builtin::new("keys", 1, 1, keys),
+    Builtin::new("values", 1, 1, values),
+    Builtin::new("get", 2, 3, get),
+    Builtin::variadic("assoc", assoc),
+    Builtin::variadic("merge", merge),
+    Builtin::new("contains?", 2, 2, contains_q),
+];
+
 inventory::submit! { Builtin::new("count",     1, 1, count) }
 inventory::submit! { Builtin::new("first",     1, 1, first) }
 inventory::submit! { Builtin::new("last",      1, 1, last) }

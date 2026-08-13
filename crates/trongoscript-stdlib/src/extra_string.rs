@@ -191,8 +191,7 @@ fn split_words(s: &str) -> Vec<String> {
         if !cur.is_empty() {
             let prev = chars[i - 1];
             // lowercase|digit → Uppercase: "hello|World", "foo|2|Bar"
-            let lower_to_upper =
-                (prev.is_lowercase() || prev.is_ascii_digit()) && c.is_uppercase();
+            let lower_to_upper = (prev.is_lowercase() || prev.is_ascii_digit()) && c.is_uppercase();
             // Uppercase → Uppercase followed by lowercase: "XML|Parser".
             let upper_run_end = prev.is_uppercase()
                 && c.is_uppercase()
@@ -383,10 +382,41 @@ fn skip_block(s: &str, tag: &str) -> Option<usize> {
     let close = format!("</{}>", tag);
     let close_bytes = close.as_bytes();
     let s_lower = s.to_ascii_lowercase();
-    s_lower
-        .find(close.as_str())
-        .map(|p| p + close_bytes.len())
+    s_lower.find(close.as_str()).map(|p| p + close_bytes.len())
 }
+
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::in_module(MODULE, "lstrip", 1, 1, lstrip),
+    Builtin::in_module(MODULE, "rstrip", 1, 1, rstrip),
+    Builtin::in_module(MODULE, "truncate", 2, 2, truncate),
+    Builtin::in_module(MODULE, "pad-left", 2, 3, pad_left),
+    Builtin::in_module(MODULE, "pad-right", 2, 3, pad_right),
+    Builtin::in_module(MODULE, "repeat", 2, 2, repeat),
+    Builtin::in_module(MODULE, "chars", 1, 1, chars),
+    Builtin::in_module(MODULE, "lines", 1, 1, lines),
+    Builtin::in_module(MODULE, "str-reverse", 1, 1, str_reverse),
+    Builtin::in_module(MODULE, "index-of", 2, 2, index_of),
+    Builtin::in_module(MODULE, "replace-first", 3, 3, replace_first),
+    Builtin::in_module(MODULE, "to-uppercase", 1, 1, to_uppercase),
+    Builtin::in_module(MODULE, "to-lowercase", 1, 1, to_lowercase),
+    Builtin::in_module(MODULE, "to-titlecase", 1, 1, to_titlecase),
+    Builtin::in_module(MODULE, "to-sentencecase", 1, 1, to_sentencecase),
+    Builtin::in_module(MODULE, "to-snakecase", 1, 1, to_snakecase),
+    Builtin::in_module(MODULE, "to-camelcase", 1, 1, to_camelcase),
+    Builtin::in_module(MODULE, "strip-html", 1, 1, strip_html),
+    Builtin::in_module(MODULE, "spintax", 2, 2, spintax),
+];
 
 inventory::submit! { Builtin::in_module(MODULE, "lstrip",        1, 1, lstrip) }
 inventory::submit! { Builtin::in_module(MODULE, "rstrip",        1, 1, rstrip) }
@@ -455,10 +485,7 @@ mod tests {
 
     #[test]
     fn strip_html_basic() {
-        assert_eq!(
-            strip_html_impl("<p>hello <b>world</b></p>"),
-            "hello world"
-        );
+        assert_eq!(strip_html_impl("<p>hello <b>world</b></p>"), "hello world");
     }
 
     #[test]
@@ -480,19 +507,11 @@ mod tests {
 
     #[test]
     fn strip_html_case_insensitive_script() {
-        assert_eq!(
-            strip_html_impl("x<SCRIPT>bad()</SCRIPT>y"),
-            "xy"
-        );
+        assert_eq!(strip_html_impl("x<SCRIPT>bad()</SCRIPT>y"), "xy");
     }
 
     fn spin(pat: &str, seed: i64) -> String {
-        match spintax(&[
-            Value::String(pat.into()),
-            Value::Number(seed.into()),
-        ])
-        .unwrap()
-        {
+        match spintax(&[Value::String(pat.into()), Value::Number(seed.into())]).unwrap() {
             Value::String(s) => s,
             _ => panic!("expected string"),
         }
@@ -521,10 +540,7 @@ mod tests {
         // outputs across 16 alternatives.
         let mut outs = std::collections::HashSet::new();
         for seed in 0..32 {
-            outs.insert(spin(
-                "{red|orange|yellow|green|blue|indigo|violet}",
-                seed,
-            ));
+            outs.insert(spin("{red|orange|yellow|green|blue|indigo|violet}", seed));
         }
         assert!(outs.len() >= 2, "no variation across seeds: {:?}", outs);
     }
@@ -533,8 +549,12 @@ mod tests {
     fn spintax_nested_groups() {
         let s = spin("{Hi|Hello {there|friend}} — welcome", 7);
         assert!(
-            ["Hi — welcome", "Hello there — welcome", "Hello friend — welcome"]
-                .contains(&s.as_str()),
+            [
+                "Hi — welcome",
+                "Hello there — welcome",
+                "Hello friend — welcome"
+            ]
+            .contains(&s.as_str()),
             "unexpected output: {:?}",
             s
         );

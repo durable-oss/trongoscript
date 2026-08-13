@@ -189,11 +189,13 @@ impl Sandbox {
 
     /// Create a sandbox rooted at `root` inside `store`.
     ///
-    /// Unlike [`Self::new`], the root is *not* canonicalized against the real
-    /// filesystem — it is taken as given and validated by asking the store
-    /// whether it is a directory. That is the whole point: a store may have
-    /// no notion of a host path to canonicalize, and for one with no symlinks
-    /// the lexically normalized path already is canonical.
+    /// The root is canonicalized *through the store*, then validated by
+    /// asking the store whether it is a directory. For [`RealFs`] that is
+    /// what [`Self::new`] always did; for a store with no symlinks it is the
+    /// lexical normalization, which is that store's canonical form. Either
+    /// way [`Self::root`] comes back in whatever spelling the backend
+    /// considers canonical, which is the spelling `resolve` compares
+    /// containment against.
     ///
     /// # Errors
     ///
@@ -217,7 +219,9 @@ impl Sandbox {
         root: P,
         store: Arc<dyn FileStore>,
     ) -> Result<Self, SandboxError> {
-        let root = normalize(root.as_ref());
+        let root = store
+            .canonicalize_existing_prefix(&normalize(root.as_ref()))
+            .map_err(|e| SandboxError::Io(e.to_string()))?;
         store_dir(store.as_ref(), &root)?;
         Ok(Self {
             mounts: Arc::new(vec![Mount {
