@@ -58,6 +58,7 @@ pub mod rng;
 pub mod sandbox;
 pub mod template;
 pub mod value;
+pub mod vfs;
 
 /// Kani proof harnesses for the sandbox's pure path/glob helpers. Empty
 /// outside `cargo kani`.
@@ -77,6 +78,7 @@ pub use trongoscript_parser::{
 };
 pub use trongoscript_stdlib::{Builtin, BuiltinError, BuiltinResult, Value};
 pub use sandbox::{Mount, Sandbox, SandboxError, SandboxLimits};
+pub use vfs::{DirEntry, FileMeta, FileStore, MemoryFs, RealFs, MEMORY_FS_ROOT};
 pub use template::{render, render_template};
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
