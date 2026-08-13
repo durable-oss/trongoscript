@@ -414,7 +414,9 @@ dependencies = [
  "inventory",
  "pretty_assertions",
  "serde_json",
+ "serde_yaml",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

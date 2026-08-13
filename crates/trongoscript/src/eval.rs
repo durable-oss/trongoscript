@@ -240,7 +240,8 @@ pub fn eval(expr: &Expr, ctx: &mut Context) -> EvalResult<Value> {
     match expr {
         Expr::Nil => Ok(Value::Null),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Number(n) => Ok(crate::value::num_from_f64(*n)),
+        Expr::Int(n) => Ok(Value::Number((*n).into())),
+        Expr::Float(n) => Ok(crate::value::num_from_f64(*n)),
         Expr::String(s) => Ok(Value::String(s.clone())),
         // Keywords evaluate to their string name. This keeps the data model
         // JSON-shaped.
@@ -312,6 +313,8 @@ fn eval_list(items: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
             "and" => return special_and(&items[1..], ctx),
             "or" => return special_or(&items[1..], ctx),
             "when" => return special_when(&items[1..], ctx),
+            "->" => return special_thread_first(&items[1..], ctx),
+            "->>" => return special_thread_last(&items[1..], ctx),
             "include" => return io_include(&items[1..], ctx),
             "read-file" => return io_read_file(&items[1..], ctx),
             "list-files" => return io_list_files(&items[1..], ctx),
@@ -401,10 +404,7 @@ fn dispatch_call(name: &str, arg_exprs: &[Expr], ctx: &mut Context) -> EvalResul
     // available whenever the `rng` module is enabled. The 2-arg form
     // with an explicit seed continues to dispatch through the stdlib
     // `strings` module as usual.
-    if name == "spintax"
-        && arg_exprs.len() == 1
-        && ctx.enabled_modules.contains("rng")
-    {
+    if name == "spintax" && arg_exprs.len() == 1 && ctx.enabled_modules.contains("rng") {
         return spintax_with_context_seed(arg_exprs, ctx);
     }
 
@@ -483,7 +483,8 @@ fn quote_to_value(e: &Expr) -> Value {
     match e {
         Expr::Nil => Value::Null,
         Expr::Bool(b) => Value::Bool(*b),
-        Expr::Number(n) => crate::value::num_from_f64(*n),
+        Expr::Int(n) => Value::Number((*n).into()),
+        Expr::Float(n) => crate::value::num_from_f64(*n),
         Expr::String(s) | Expr::Keyword(s) | Expr::Symbol(s) => Value::String(s.clone()),
         Expr::Vector(items) | Expr::List(items) => {
             Value::Array(items.iter().map(quote_to_value).collect())
@@ -537,6 +538,62 @@ fn special_when(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
         last = eval(e, ctx)?;
     }
     Ok(last)
+}
+
+/// Build the threaded form for one step of `->` / `->>`.
+///
+/// `acc` is the accumulated expression threaded so far. `form` is the next
+/// step. A bare symbol `f` becomes `(f acc)`; a call `(f a b)` becomes
+/// `(f acc a b)` for thread-first or `(f a b acc)` for thread-last.
+fn thread_step(acc: Expr, form: &Expr, last: bool) -> EvalResult<Expr> {
+    match form {
+        // Bare symbol or any non-list form: wrap as a single-arg call.
+        Expr::Symbol(_) => Ok(Expr::List(vec![form.clone(), acc])),
+        Expr::List(items) if !items.is_empty() => {
+            let mut out = Vec::with_capacity(items.len() + 1);
+            if last {
+                out.extend(items.iter().cloned());
+                out.push(acc);
+            } else {
+                out.push(items[0].clone());
+                out.push(acc);
+                out.extend(items[1..].iter().cloned());
+            }
+            Ok(Expr::List(out))
+        }
+        other => Err(EvalError::InvalidForm(format!(
+            "thread step must be a symbol or non-empty list, got {:?}",
+            other
+        ))),
+    }
+}
+
+/// Expand a `->` / `->>` form to its fully threaded expression (no eval).
+fn build_thread(args: &[Expr], last: bool) -> EvalResult<Expr> {
+    let Some((first, steps)) = args.split_first() else {
+        return Err(EvalError::Arity {
+            function: if last { "->>" } else { "->" }.into(),
+            expected: ">=1".into(),
+            actual: 0,
+        });
+    };
+    let mut acc = first.clone();
+    for step in steps {
+        acc = thread_step(acc, step, last)?;
+    }
+    Ok(acc)
+}
+
+/// `(-> x (f a) g ...)` — thread `x` as the first argument of each step.
+fn special_thread_first(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
+    let threaded = build_thread(args, false)?;
+    eval(&threaded, ctx)
+}
+
+/// `(->> x (f a) g ...)` — thread `x` as the last argument of each step.
+fn special_thread_last(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
+    let threaded = build_thread(args, true)?;
+    eval(&threaded, ctx)
 }
 
 /// `(let [n1 v1 n2 v2 ...] body...)`
@@ -1023,7 +1080,8 @@ fn special_macroexpand(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     // The argument is a *quoted* form: typically `(macroexpand '(my-macro x y))`.
     let target = match &args[0] {
         Expr::List(items)
-            if matches!(items.first(), Some(Expr::Symbol(s)) if s == "quote") && items.len() == 2 =>
+            if matches!(items.first(), Some(Expr::Symbol(s)) if s == "quote")
+                && items.len() == 2 =>
         {
             items[1].clone()
         }
@@ -1153,7 +1211,10 @@ fn substitute(
         Expr::Map(pairs) => {
             let mut out = Vec::with_capacity(pairs.len());
             for (k, v) in pairs {
-                out.push((substitute(k, subs, ctx, depth)?, substitute(v, subs, ctx, depth)?));
+                out.push((
+                    substitute(k, subs, ctx, depth)?,
+                    substitute(v, subs, ctx, depth)?,
+                ));
             }
             Ok(Expr::Map(out))
         }
@@ -1287,9 +1348,9 @@ pub fn value_to_expr(v: &Value) -> Expr {
         Value::Bool(b) => Expr::Bool(*b),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Expr::Number(i as f64)
+                Expr::Int(i)
             } else if let Some(f) = n.as_f64() {
-                Expr::Number(f)
+                Expr::Float(f)
             } else {
                 Expr::Nil
             }
@@ -1388,7 +1449,9 @@ fn io_include(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let prev_dir = ctx.current_file_dir.take();
     ctx.current_file_dir = resolved.parent().map(|p| p.to_path_buf());
 
-    let result = source.map_err(EvalError::from).and_then(|s| eval_source(&s, ctx));
+    let result = source
+        .map_err(EvalError::from)
+        .and_then(|s| eval_source(&s, ctx));
 
     ctx.current_file_dir = prev_dir;
     ctx.includes.stack.pop();
@@ -1425,10 +1488,7 @@ fn io_glob(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let pattern = one_string_arg("glob", args, ctx)?;
     let sb = require_sandbox(ctx)?.clone();
     let matches = sb.glob(ctx.current_file_dir.as_deref(), &pattern)?;
-    let arr = matches
-        .into_iter()
-        .map(|m| Value::String(m.path))
-        .collect();
+    let arr = matches.into_iter().map(|m| Value::String(m.path)).collect();
     Ok(Value::Array(arr))
 }
 
@@ -1470,9 +1530,12 @@ pub fn partial_eval(
 ) -> EvalResult<Partial> {
     match expr {
         // Atoms and self-evaluating forms: reduce fully.
-        Expr::Nil | Expr::Bool(_) | Expr::Number(_) | Expr::String(_) | Expr::Keyword(_) => {
-            eval(expr, ctx).map(Partial::Done)
-        }
+        Expr::Nil
+        | Expr::Bool(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Keyword(_) => eval(expr, ctx).map(Partial::Done),
 
         // Symbol: resolve; if undefined this is an error, not a suspension.
         Expr::Symbol(_) => eval(expr, ctx).map(Partial::Done),
@@ -1565,6 +1628,14 @@ fn partial_eval_list(
             return Ok(Partial::Suspended(Expr::List(reduced)));
         }
 
+        // `->` / `->>`: pure structural rewrites. Expand to the threaded
+        // form and partially evaluate that, so a threaded opaque activity
+        // result is handled like any other suspended sub-form.
+        if name == "->" || name == "->>" {
+            let threaded = build_thread(&items[1..], name == "->>")?;
+            return partial_eval(&threaded, ctx, opaque_forms);
+        }
+
         // `if`: only reduce the live branch.
         if name == "if" {
             return partial_eval_if(&items[1..], ctx, opaque_forms);
@@ -1593,10 +1664,21 @@ fn partial_eval_list(
         // suspension boundary anyway.
         if matches!(
             name.as_str(),
-            "fn" | "defn" | "defmacro" | "macroexpand"
-                | "quote" | "quasiquote" | "unquote" | "unquote-splicing"
-                | "and" | "or" | "def"
-                | "include" | "read-file" | "list-files" | "glob" | "use"
+            "fn" | "defn"
+                | "defmacro"
+                | "macroexpand"
+                | "quote"
+                | "quasiquote"
+                | "unquote"
+                | "unquote-splicing"
+                | "and"
+                | "or"
+                | "def"
+                | "include"
+                | "read-file"
+                | "list-files"
+                | "glob"
+                | "use"
         ) {
             return eval(&Expr::List(items.to_vec()), ctx).map(Partial::Done);
         }
@@ -1746,7 +1828,11 @@ fn partial_eval_let(
     };
     let bindings = match bindings_expr {
         Expr::Vector(items) => items,
-        _ => return Err(EvalError::InvalidForm("let bindings must be a vector".into())),
+        _ => {
+            return Err(EvalError::InvalidForm(
+                "let bindings must be a vector".into(),
+            ))
+        }
     };
     if bindings.len() % 2 != 0 {
         return Err(EvalError::InvalidForm(
@@ -1854,6 +1940,5 @@ fn partial_eval_when(
 #[cfg(test)]
 #[path = "tests/mod.rs"]
 mod tests;
-
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

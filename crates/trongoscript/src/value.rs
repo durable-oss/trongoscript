@@ -52,20 +52,8 @@ pub fn is_function(v: &Value) -> bool {
     fn_handle(v).is_some()
 }
 
-/// Convert an `f64` to a JSON number, preferring an integer representation
-/// when the value has no fractional part and fits in `i64`. Returns
-/// `Value::Null` for `NaN` and infinities (which JSON cannot represent).
-pub fn num_from_f64(n: f64) -> Value {
-    if !n.is_finite() {
-        return Value::Null;
-    }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        return Value::Number((n as i64).into());
-    }
-    match serde_json::Number::from_f64(n) {
-        Some(num) => Value::Number(num),
-        None => Value::Null,
-    }
-}
+// `num_from_f64` (f64 -> int-preferring JSON number) lives in
+// `trongoscript-stdlib`, the single source of truth shared by all builtins.
+pub use trongoscript_stdlib::num_from_f64;
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

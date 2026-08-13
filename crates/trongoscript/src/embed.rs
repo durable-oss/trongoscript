@@ -84,10 +84,7 @@ pub fn evaluate_embedded_with(
 /// - YAML nodes tagged with `!trongo` (the inner scalar is the expression),
 /// - the string-prefix form (`"!trongo <expr>"`),
 /// - the single-key-map form (`{"!trongo": "<expr>"}`).
-pub fn evaluate_embedded_yaml(
-    root: serde_yaml::Value,
-    ctx: &mut Context,
-) -> EvalResult<Value> {
+pub fn evaluate_embedded_yaml(root: serde_yaml::Value, ctx: &mut Context) -> EvalResult<Value> {
     evaluate_embedded_yaml_with(root, ctx, DEFAULT_TAG, DEFAULT_PREFIX, DEFAULT_KEY)
 }
 
@@ -224,11 +221,7 @@ mod tests {
 
     #[test]
     fn walks_lists() {
-        let root = serde_json::json!([
-            "!trongo (+ 1 1)",
-            "literal",
-            "!trongo (str \"hi-\" 3)"
-        ]);
+        let root = serde_json::json!(["!trongo (+ 1 1)", "literal", "!trongo (str \"hi-\" 3)"]);
         let mut ctx = Context::new(EvalConfig::default());
         let v = evaluate_embedded(root, &mut ctx).unwrap();
         assert_eq!(v[0], Value::Number(2.into()));

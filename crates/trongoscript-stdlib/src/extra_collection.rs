@@ -3,24 +3,11 @@
 //! Activated by `(use collections)`. Pure data transformations.
 
 use crate::{
-    expect_array, expect_number, expect_string, inventory, type_name, Builtin, BuiltinError,
-    BuiltinResult, Value,
+    expect_array, expect_number, expect_string, inventory, num_from_f64, type_name, Builtin,
+    BuiltinError, BuiltinResult, Value,
 };
 
 const MODULE: &str = "collections";
-
-fn num_from_f64(n: f64) -> Value {
-    if !n.is_finite() {
-        return Value::Null;
-    }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        return Value::Number((n as i64).into());
-    }
-    match serde_json::Number::from_f64(n) {
-        Some(num) => Value::Number(num),
-        None => Value::Null,
-    }
-}
 
 /// Total ordering for `Value`s that allows mixed homogeneous arrays.
 /// Returns `None` for cross-type comparisons.

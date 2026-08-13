@@ -6,7 +6,8 @@
 //!
 //! Atoms:
 //!   nil, true, false                — constants
-//!   42, 3.14, -7, 1e9               — numbers (f64)
+//!   42, -7                          — integers (i64)
+//!   3.14, 1e9                       — floats (f64)
 //!   "string"                        — strings (escapes: \n \t \r \\ \" \u{XXXX})
 //!   :keyword                        — keyword (evaluates to its string name)
 //!   foo, foo-bar, +, my/fn          — symbols (variable lookup or special form head)
@@ -32,7 +33,8 @@ use std::fmt;
 pub enum Expr {
     Nil,
     Bool(bool),
-    Number(f64),
+    Int(i64),
+    Float(f64),
     String(String),
     Keyword(String),
     Symbol(String),
@@ -49,7 +51,8 @@ impl fmt::Display for Expr {
         match self {
             Expr::Nil => f.write_str("nil"),
             Expr::Bool(b) => write!(f, "{}", b),
-            Expr::Number(n) => write!(f, "{}", n),
+            Expr::Int(n) => write!(f, "{}", n),
+            Expr::Float(n) => write!(f, "{}", n),
             Expr::String(s) => write!(f, "{:?}", s),
             Expr::Keyword(k) => write!(f, ":{}", k),
             Expr::Symbol(s) => f.write_str(s),

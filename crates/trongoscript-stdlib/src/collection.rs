@@ -1,19 +1,9 @@
 //! Collection (list / map) builtins.
 
-use crate::{expect_array, expect_object, inventory, Builtin, BuiltinError, BuiltinResult, Value};
-
-fn num_from_f64(n: f64) -> Value {
-    if !n.is_finite() {
-        return Value::Null;
-    }
-    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
-        return Value::Number((n as i64).into());
-    }
-    match serde_json::Number::from_f64(n) {
-        Some(num) => Value::Number(num),
-        None => Value::Null,
-    }
-}
+use crate::{
+    expect_array, expect_object, inventory, num_from_f64, Builtin, BuiltinError, BuiltinResult,
+    Value,
+};
 
 fn count(args: &[Value]) -> BuiltinResult {
     let n = match &args[0] {
@@ -70,6 +60,18 @@ fn nth(args: &[Value]) -> BuiltinResult {
         });
     }
     Ok(a[i as usize].clone())
+}
+
+fn list(args: &[Value]) -> BuiltinResult {
+    Ok(Value::Array(args.to_vec()))
+}
+
+fn cons(args: &[Value]) -> BuiltinResult {
+    let tail = expect_array("cons", &args[1])?;
+    let mut out = Vec::with_capacity(tail.len() + 1);
+    out.push(args[0].clone());
+    out.extend(tail.iter().cloned());
+    Ok(Value::Array(out))
 }
 
 fn conj(args: &[Value]) -> BuiltinResult {
@@ -269,6 +271,8 @@ inventory::submit! { Builtin::new("first",     1, 1, first) }
 inventory::submit! { Builtin::new("last",      1, 1, last) }
 inventory::submit! { Builtin::new("rest",      1, 1, rest) }
 inventory::submit! { Builtin::new("nth",       2, 2, nth) }
+inventory::submit! { Builtin::variadic("list", list) }
+inventory::submit! { Builtin::new("cons",      2, 2, cons) }
 inventory::submit! { Builtin::variadic("conj", conj) }
 inventory::submit! { Builtin::variadic("concat", concat) }
 inventory::submit! { Builtin::new("reverse",   1, 1, reverse) }

@@ -19,7 +19,10 @@ fn pe_ctx() -> Context {
 fn done_num(p: Partial) -> f64 {
     match p {
         Partial::Done(Value::Number(n)) => n.as_f64().unwrap(),
-        other => panic!("expected Done(Number), got {:?}", matches!(other, Partial::Done(_))),
+        other => panic!(
+            "expected Done(Number), got {:?}",
+            matches!(other, Partial::Done(_))
+        ),
     }
 }
 
@@ -43,13 +46,19 @@ fn nil_atom() {
 #[test]
 fn bool_true() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_val(pe("true", &mut ctx, &opaque(&[]))), Value::Bool(true));
+    assert_eq!(
+        done_val(pe("true", &mut ctx, &opaque(&[]))),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn bool_false() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_val(pe("false", &mut ctx, &opaque(&[]))), Value::Bool(false));
+    assert_eq!(
+        done_val(pe("false", &mut ctx, &opaque(&[]))),
+        Value::Bool(false)
+    );
 }
 
 #[test]
@@ -83,7 +92,8 @@ fn keyword() {
 #[test]
 fn defined_symbol_resolves() {
     let mut ctx = pe_ctx();
-    ctx.globals_mut().insert("x".into(), Value::Number(99.into()));
+    ctx.globals_mut()
+        .insert("x".into(), Value::Number(99.into()));
     assert_eq!(done_num(pe("x", &mut ctx, &opaque(&[]))), 99.0);
 }
 
@@ -108,14 +118,20 @@ fn pure_expr_is_done() {
 #[test]
 fn empty_list_is_done() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_val(pe("()", &mut ctx, &opaque(&[]))), Value::Array(vec![]));
+    assert_eq!(
+        done_val(pe("()", &mut ctx, &opaque(&[]))),
+        Value::Array(vec![])
+    );
 }
 
 #[test]
 fn nested_pure_reduces_fully() {
     // (* (+ 1 2) (- 10 4)) = 3 * 6 = 18
     let mut ctx = pe_ctx();
-    assert_eq!(done_num(pe("(* (+ 1 2) (- 10 4))", &mut ctx, &opaque(&[]))), 18.0);
+    assert_eq!(
+        done_num(pe("(* (+ 1 2) (- 10 4))", &mut ctx, &opaque(&[]))),
+        18.0
+    );
 }
 
 #[test]
@@ -137,7 +153,10 @@ fn def_form_works() {
 #[test]
 fn let_form_works() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_num(pe("(let [a 3 b 4] (+ a b))", &mut ctx, &opaque(&[]))), 7.0);
+    assert_eq!(
+        done_num(pe("(let [a 3 b 4] (+ a b))", &mut ctx, &opaque(&[]))),
+        7.0
+    );
 }
 
 #[test]
@@ -207,7 +226,7 @@ fn opaque_form_folds_pure_args() {
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("run-activity".into()));
         assert_eq!(items[1], Expr::Keyword("task".into()));
-        assert_eq!(items[2], Expr::Number(3.0));
+        assert_eq!(items[2], Expr::Int(3));
     } else {
         panic!("expected Suspended(List(...))");
     }
@@ -217,8 +236,14 @@ fn opaque_form_folds_pure_args() {
 fn multiple_opaque_forms_in_set() {
     let ops = opaque(&["run-activity", "sleep-until"]);
     let mut ctx = pe_ctx();
-    assert!(matches!(pe("(run-activity :x)", &mut ctx, &ops), Partial::Suspended(_)));
-    assert!(matches!(pe("(sleep-until 100)", &mut ctx, &ops), Partial::Suspended(_)));
+    assert!(matches!(
+        pe("(run-activity :x)", &mut ctx, &ops),
+        Partial::Suspended(_)
+    ));
+    assert!(matches!(
+        pe("(sleep-until 100)", &mut ctx, &ops),
+        Partial::Suspended(_)
+    ));
 }
 
 #[test]
@@ -233,17 +258,19 @@ fn non_opaque_form_falls_through_to_normal_eval_error() {
 fn nested_opaque_inside_opaque_outer_preserved() {
     // Outer opaque suspends immediately; inner is never touched.
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(run-activity :outer (run-activity :inner))"
-    ).unwrap();
+    let expr =
+        trongoscript_parser::parse_expr("(run-activity :outer (run-activity :inner))").unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("run-activity".into()));
         assert_eq!(items[1], Expr::Keyword("outer".into()));
-        assert_eq!(items[2], Expr::List(vec![
-            Expr::Symbol("run-activity".into()),
-            Expr::Keyword("inner".into()),
-        ]));
+        assert_eq!(
+            items[2],
+            Expr::List(vec![
+                Expr::Symbol("run-activity".into()),
+                Expr::Keyword("inner".into()),
+            ])
+        );
     } else {
         panic!("expected Suspended(List(...))");
     }
@@ -272,7 +299,7 @@ fn list_pure_args_folded_in_residual() {
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("+".into()));
         assert!(matches!(&items[1], Expr::List(_)));
-        assert_eq!(items[2], Expr::Number(12.0));
+        assert_eq!(items[2], Expr::Int(12));
     } else {
         panic!("expected Suspended(List(...))");
     }
@@ -281,9 +308,7 @@ fn list_pure_args_folded_in_residual() {
 #[test]
 fn list_multiple_opaque_children_both_suspended() {
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(+ (run-activity :a) (run-activity :b))"
-    ).unwrap();
+    let expr = trongoscript_parser::parse_expr("(+ (run-activity :a) (run-activity :b))").unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items.len(), 3);
@@ -301,9 +326,7 @@ fn list_multiple_opaque_children_both_suspended() {
 #[test]
 fn if_true_condition_opaque_then_suspends() {
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(if true (run-activity :work) (+ 1 2))",
-    ).unwrap();
+    let expr = trongoscript_parser::parse_expr("(if true (run-activity :work) (+ 1 2))").unwrap();
     assert!(matches!(
         partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap(),
         Partial::Suspended(_)
@@ -313,9 +336,7 @@ fn if_true_condition_opaque_then_suspends() {
 #[test]
 fn if_false_condition_pure_else_is_done() {
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(if false (run-activity :work) (+ 1 2))",
-    ).unwrap();
+    let expr = trongoscript_parser::parse_expr("(if false (run-activity :work) (+ 1 2))").unwrap();
     assert!(matches!(
         partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap(),
         Partial::Done(v) if v == Value::Number(3.into())
@@ -325,21 +346,25 @@ fn if_false_condition_pure_else_is_done() {
 #[test]
 fn if_true_condition_pure_then_no_else() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_num(pe("(if true (+ 10 5))", &mut ctx, &opaque(&[]))), 15.0);
+    assert_eq!(
+        done_num(pe("(if true (+ 10 5))", &mut ctx, &opaque(&[]))),
+        15.0
+    );
 }
 
 #[test]
 fn if_false_no_else_returns_nil() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_val(pe("(if false 99)", &mut ctx, &opaque(&[]))), Value::Null);
+    assert_eq!(
+        done_val(pe("(if false 99)", &mut ctx, &opaque(&[]))),
+        Value::Null
+    );
 }
 
 #[test]
 fn if_suspended_condition_suspends_whole_if() {
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(if (run-activity :check) 1 2)",
-    ).unwrap();
+    let expr = trongoscript_parser::parse_expr("(if (run-activity :check) 1 2)").unwrap();
     assert!(matches!(
         partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap(),
         Partial::Suspended(_)
@@ -350,15 +375,13 @@ fn if_suspended_condition_suspends_whole_if() {
 fn if_suspended_condition_folds_pure_branches() {
     // Both branches pure; they should be folded in the residual.
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(if (run-activity :c) (* 3 3) (+ 1 1))"
-    ).unwrap();
+    let expr = trongoscript_parser::parse_expr("(if (run-activity :c) (* 3 3) (+ 1 1))").unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::List(items)) = r {
         assert_eq!(items[0], Expr::Symbol("if".into()));
         assert!(matches!(&items[1], Expr::List(_))); // suspended condition
-        assert_eq!(items[2], Expr::Number(9.0));     // then folded
-        assert_eq!(items[3], Expr::Number(2.0));     // else folded
+        assert_eq!(items[2], Expr::Int(9)); // then folded
+        assert_eq!(items[3], Expr::Int(2)); // else folded
     } else {
         panic!("expected Suspended(List(if ...))");
     }
@@ -380,13 +403,12 @@ fn if_suspended_condition_no_else_residual_has_three_items() {
 #[test]
 fn if_suspended_condition_opaque_then_pure_else() {
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        "(if (run-activity :c) (run-activity :work) 0)"
-    ).unwrap();
+    let expr =
+        trongoscript_parser::parse_expr("(if (run-activity :c) (run-activity :work) 0)").unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::List(items)) = r {
         assert!(matches!(&items[2], Expr::List(_))); // then still suspended
-        assert_eq!(items[3], Expr::Number(0.0));     // else folded
+        assert_eq!(items[3], Expr::Int(0)); // else folded
     } else {
         panic!("expected Suspended");
     }
@@ -432,7 +454,10 @@ fn pure_vector_is_done() {
 #[test]
 fn empty_vector_is_done() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_val(pe("[]", &mut ctx, &opaque(&[]))), Value::Array(vec![]));
+    assert_eq!(
+        done_val(pe("[]", &mut ctx, &opaque(&[]))),
+        Value::Array(vec![])
+    );
 }
 
 #[test]
@@ -441,9 +466,9 @@ fn vector_with_opaque_child_suspends_and_folds_pure() {
     let expr = trongoscript_parser::parse_expr("[(+ 1 2) (run-activity :x) 10]").unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::Vector(items)) = r {
-        assert_eq!(items[0], Expr::Number(3.0));
+        assert_eq!(items[0], Expr::Int(3));
         assert!(matches!(&items[1], Expr::List(_)));
-        assert_eq!(items[2], Expr::Number(10.0));
+        assert_eq!(items[2], Expr::Int(10));
     } else {
         panic!("expected Suspended(Vector(...))");
     }
@@ -453,7 +478,11 @@ fn vector_with_opaque_child_suspends_and_folds_pure() {
 fn vector_all_compound_but_pure_is_done() {
     let mut ctx = pe_ctx();
     assert_eq!(
-        done_val(pe("[(+ 1 1) (* 3 3)]", &mut ctx, &opaque(&["run-activity"]))),
+        done_val(pe(
+            "[(+ 1 1) (* 3 3)]",
+            &mut ctx,
+            &opaque(&["run-activity"])
+        )),
         Value::Array(vec![Value::Number(2.into()), Value::Number(9.into())])
     );
 }
@@ -482,13 +511,12 @@ fn empty_map_is_done() {
 #[test]
 fn map_with_suspended_value_suspends_and_folds_pure() {
     let mut ctx = pe_ctx();
-    let expr = trongoscript_parser::parse_expr(
-        r#"{:result (run-activity :fetch) :count (+ 1 2)}"#
-    ).unwrap();
+    let expr = trongoscript_parser::parse_expr(r#"{:result (run-activity :fetch) :count (+ 1 2)}"#)
+        .unwrap();
     let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
     if let Partial::Suspended(Expr::Map(pairs)) = r {
         assert!(matches!(&pairs[0].1, Expr::List(_))); // :result still opaque
-        assert_eq!(pairs[1].1, Expr::Number(3.0));     // :count folded
+        assert_eq!(pairs[1].1, Expr::Int(3)); // :count folded
     } else {
         panic!("expected Suspended(Map(...))");
     }
@@ -548,7 +576,10 @@ fn let_with_opaque_binding_suspends() {
 fn let_with_pure_body_reduces() {
     // With no opaque forms, a let reduces fully, exactly as `eval` would.
     let mut ctx = pe_ctx();
-    assert_eq!(done_num(pe("(let [a 2 b 3] (+ a b))", &mut ctx, &opaque(&[]))), 5.0);
+    assert_eq!(
+        done_num(pe("(let [a 2 b 3] (+ a b))", &mut ctx, &opaque(&[]))),
+        5.0
+    );
 }
 
 #[test]
@@ -593,5 +624,64 @@ fn sequence_of_calls_shares_context() {
 #[test]
 fn first_class_fn_head_reduces() {
     let mut ctx = pe_ctx();
-    assert_eq!(done_num(pe("((fn [x] (* x 2)) 5)", &mut ctx, &opaque(&[]))), 10.0);
+    assert_eq!(
+        done_num(pe("((fn [x] (* x 2)) 5)", &mut ctx, &opaque(&[]))),
+        10.0
+    );
+}
+
+#[test]
+fn thread_first_fully_reduces_when_pure() {
+    let mut ctx = pe_ctx();
+    // No opaque forms: (-> 5 (+ 3) (* 2)) folds to 16.
+    assert_eq!(done_num(pe("(-> 5 (+ 3) (* 2))", &mut ctx, &opaque(&[]))), 16.0);
+}
+
+#[test]
+fn thread_first_threads_opaque_result_and_suspends() {
+    // (-> (run-activity :a) (+ 1)) must expand to (+ (run-activity :a) 1)
+    // and suspend, carrying the threaded opaque sub-form.
+    let mut ctx = pe_ctx();
+    let r = pe(
+        "(-> (run-activity :a) (+ 1))",
+        &mut ctx,
+        &opaque(&["run-activity"]),
+    );
+    if let Partial::Suspended(Expr::List(items)) = r {
+        assert_eq!(items[0], Expr::Symbol("+".into()));
+        assert_eq!(
+            items[1],
+            Expr::List(vec![
+                Expr::Symbol("run-activity".into()),
+                Expr::Keyword("a".into()),
+            ])
+        );
+        assert_eq!(items[2], Expr::Int(1));
+    } else {
+        panic!("expected Suspended(List(...))");
+    }
+}
+
+#[test]
+fn thread_last_threads_opaque_result_and_suspends() {
+    // (->> (run-activity :a) (- 100)) expands to (- 100 (run-activity :a)).
+    let mut ctx = pe_ctx();
+    let r = pe(
+        "(->> (run-activity :a) (- 100))",
+        &mut ctx,
+        &opaque(&["run-activity"]),
+    );
+    if let Partial::Suspended(Expr::List(items)) = r {
+        assert_eq!(items[0], Expr::Symbol("-".into()));
+        assert_eq!(items[1], Expr::Int(100));
+        assert_eq!(
+            items[2],
+            Expr::List(vec![
+                Expr::Symbol("run-activity".into()),
+                Expr::Keyword("a".into()),
+            ])
+        );
+    } else {
+        panic!("expected Suspended(List(...))");
+    }
 }

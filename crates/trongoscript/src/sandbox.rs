@@ -87,11 +87,7 @@ pub enum SandboxError {
     #[error("not a directory: {0}")]
     NotADirectory(String),
     #[error("file too large: {path} ({size} bytes, limit {limit})")]
-    FileTooLarge {
-        path: String,
-        size: u64,
-        limit: u64,
-    },
+    FileTooLarge { path: String, size: u64, limit: u64 },
     #[error("include depth exceeded ({max})")]
     IncludeTooDeep { max: usize },
     #[error("include cycle detected: {0}")]
@@ -429,7 +425,11 @@ impl Sandbox {
 
     /// List the names of regular files / directories in `requested` (a
     /// directory relative to the sandbox root).
-    pub fn list(&self, base: Option<&Path>, requested: &str) -> Result<Vec<DirEntry>, SandboxError> {
+    pub fn list(
+        &self,
+        base: Option<&Path>,
+        requested: &str,
+    ) -> Result<Vec<DirEntry>, SandboxError> {
         let path = self.resolve(base, requested)?;
         let meta = self.store.metadata(&path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => SandboxError::NotFound(path.display().to_string()),
@@ -480,11 +480,7 @@ impl Sandbox {
     /// the mount it started in. Returned paths use `/` as the component
     /// separator regardless of host OS — see [`GlobMatch::path`] for
     /// whether they come back relative or absolute.
-    pub fn glob(
-        &self,
-        base: Option<&Path>,
-        pattern: &str,
-    ) -> Result<Vec<GlobMatch>, SandboxError> {
+    pub fn glob(&self, base: Option<&Path>, pattern: &str) -> Result<Vec<GlobMatch>, SandboxError> {
         if pattern.is_empty() {
             return Ok(Vec::new());
         }
@@ -526,7 +522,11 @@ impl Sandbox {
             let v = self
                 .to_virtual(&start_dir)
                 .ok_or_else(|| SandboxError::NoMount(pattern.to_string()))?;
-            if v == "/" { String::new() } else { v }
+            if v == "/" {
+                String::new()
+            } else {
+                v
+            }
         } else {
             match start_dir.strip_prefix(self.root()) {
                 Ok(p) => path_to_forward_slash(p),
@@ -889,9 +889,9 @@ fn virtual_strip_prefix<'a>(vpath: &'a str, prefix: &str) -> Option<&'a str> {
     }
     let rest = vpath.strip_prefix(prefix)?;
     match rest.as_bytes().first() {
-        None => Some(""),          // exact match: the mount point itself
+        None => Some(""),               // exact match: the mount point itself
         Some(b'/') => Some(&rest[1..]), // a path inside the mount
-        _ => None,                 // partial segment match, e.g. /tomcat vs /tom
+        _ => None,                      // partial segment match, e.g. /tomcat vs /tom
     }
 }
 
@@ -1103,10 +1103,8 @@ mod tests {
     fn glob_does_not_follow_symlinks() {
         use std::os::unix::fs::symlink;
         let dir = tmp_root();
-        let outside = std::env::temp_dir().join(format!(
-            "trongo-glob-outside-{}",
-            std::process::id()
-        ));
+        let outside =
+            std::env::temp_dir().join(format!("trongo-glob-outside-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&outside);
         std::fs::write(outside.join("secret.txt"), "shh").unwrap();
         symlink(&outside, dir.0.join("link")).unwrap();
@@ -1318,14 +1316,26 @@ mod tests {
     fn mount_rejects_relative_and_duplicate_points() {
         let (dir, sb) = bob_and_tom();
         let err = sb.clone().mount("tom", dir.0.join("tom")).unwrap_err();
-        assert!(matches!(err, SandboxError::BadMountPoint(_)), "got {:?}", err);
+        assert!(
+            matches!(err, SandboxError::BadMountPoint(_)),
+            "got {:?}",
+            err
+        );
 
         let err = sb.clone().mount("/tom", dir.0.join("tom")).unwrap_err();
-        assert!(matches!(err, SandboxError::DuplicateMount(_)), "got {:?}", err);
+        assert!(
+            matches!(err, SandboxError::DuplicateMount(_)),
+            "got {:?}",
+            err
+        );
 
         // Trailing slash is the same mount point, not a new one.
         let err = sb.clone().mount("/tom/", dir.0.join("tom")).unwrap_err();
-        assert!(matches!(err, SandboxError::DuplicateMount(_)), "got {:?}", err);
+        assert!(
+            matches!(err, SandboxError::DuplicateMount(_)),
+            "got {:?}",
+            err
+        );
 
         // Nonexistent host dir.
         let err = sb.clone().mount("/nope", dir.0.join("nope")).unwrap_err();
@@ -1466,12 +1476,10 @@ mod tests {
     fn size_limit_enforced() {
         let dir = tmp_root();
         fs::write(dir.0.join("big.bin"), vec![0u8; 100]).unwrap();
-        let sb = Sandbox::new(&dir.0)
-            .unwrap()
-            .with_limits(SandboxLimits {
-                max_file_bytes: 10,
-                ..SandboxLimits::default()
-            });
+        let sb = Sandbox::new(&dir.0).unwrap().with_limits(SandboxLimits {
+            max_file_bytes: 10,
+            ..SandboxLimits::default()
+        });
         let err = sb.read_text(None, "big.bin").unwrap_err();
         assert!(matches!(err, SandboxError::FileTooLarge { .. }));
     }
