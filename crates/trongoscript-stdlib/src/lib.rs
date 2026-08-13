@@ -214,6 +214,7 @@ static CRATE_BUILTINS: &[&[Builtin]] = &[
     logic::BUILTINS,
     math::BUILTINS,
     numeric::BUILTINS,
+    serde_fmt::BUILTINS,
     string::BUILTINS,
 ];
 
@@ -373,6 +374,29 @@ mod tests {
             names.len() >= 100,
             "expected the whole stdlib, got {}",
             names.len()
+        );
+    }
+
+    #[test]
+    fn nothing_is_registered_through_inventory_alone() {
+        // The guard that generalizes the wasm32 fix. Adding a module and
+        // wiring up only its `inventory::submit!` calls compiles, passes
+        // every native test, and ships a build where those builtins simply
+        // do not exist in a browser. Since this crate's own builtins are
+        // always in a slice, anything reaching the inventory registry from
+        // *inside* this crate is a module someone forgot to add to
+        // `CRATE_BUILTINS`.
+        let missing: Vec<&str> = inventory::iter::<Builtin>
+            .into_iter()
+            .filter(|b| !is_own(b))
+            .map(|b| b.name)
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "these builtins exist only in the inventory registry, so they \
+             would be missing on wasm32 — add their module's `BUILTINS` \
+             slice to `CRATE_BUILTINS`: {missing:?}"
         );
     }
 

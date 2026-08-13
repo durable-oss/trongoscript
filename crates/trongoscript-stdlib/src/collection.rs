@@ -254,6 +254,8 @@ pub static BUILTINS: &[Builtin] = &[
     Builtin::new("last", 1, 1, last),
     Builtin::new("rest", 1, 1, rest),
     Builtin::new("nth", 2, 2, nth),
+    Builtin::variadic("list", list),
+    Builtin::new("cons", 2, 2, cons),
     Builtin::variadic("conj", conj),
     Builtin::variadic("concat", concat),
     Builtin::new("reverse", 1, 1, reverse),
