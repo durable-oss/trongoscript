@@ -6,6 +6,71 @@ use crate::{expect_number, expect_string, inventory, Builtin, BuiltinError, Buil
 
 const MODULE: &str = "strings";
 
+/// Describe a byte count for an error message, in whichever unit reads
+/// most clearly. The ceiling is now configurable, so it is no longer
+/// always a whole number of mebibytes.
+fn describe_bytes(n: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    if n >= MIB && n.is_multiple_of(MIB) {
+        format!("{} MiB", n / MIB)
+    } else if n >= KIB && n.is_multiple_of(KIB) {
+        format!("{} KiB", n / KIB)
+    } else {
+        format!("{n} bytes")
+    }
+}
+
+/// Interpret a numeric argument as an output length in bytes, rejecting
+/// anything that cannot produce a string of that size.
+///
+/// `f64 as usize` saturates rather than wrapping, so a huge or infinite
+/// count silently becomes `usize::MAX` and the caller then asks the
+/// allocator for it. NaN converts to 0, which is worse: it fails a
+/// `< 0.0` test and looks like a legitimate empty request. Both are
+/// rejected explicitly here.
+///
+/// `unit` is the byte cost of one output element, so the check bounds
+/// bytes rather than element count.
+///
+/// The ceiling comes from [`crate::output_limit`], which the evaluator
+/// sets from its allocation budget for the duration of the call. It was
+/// once a hardcoded 16 MiB, which made `--max-alloc 1000` unable to stop
+/// a 16 MiB allocation inside a single call; that value is now only the
+/// default for callers that publish no budget.
+fn output_len(fname: &str, n: f64, unit: usize) -> Result<usize, BuiltinError> {
+    let max_out = crate::output_limit::limit();
+
+    if n.is_nan() {
+        return Err(BuiltinError::ArgError {
+            function: fname.into(),
+            message: "count must be a number, got NaN".into(),
+        });
+    }
+    if n < 0.0 {
+        return Err(BuiltinError::ArgError {
+            function: fname.into(),
+            message: "count must be non-negative".into(),
+        });
+    }
+    // Compare in f64 before converting: a count past usize saturates on
+    // cast, so the cast alone cannot tell "enormous" from "the maximum".
+    if !n.is_finite() || n * (unit.max(1) as f64) > max_out as f64 {
+        return Err(BuiltinError::Failed {
+            function: fname.into(),
+            message: format!("output would exceed {}", describe_bytes(max_out)),
+        });
+    }
+    let n = n as usize;
+    if n.saturating_mul(unit) > max_out {
+        return Err(BuiltinError::Failed {
+            function: fname.into(),
+            message: format!("output would exceed {}", describe_bytes(max_out)),
+        });
+    }
+    Ok(n)
+}
+
 fn lstrip(args: &[Value]) -> BuiltinResult {
     Ok(Value::String(
         expect_string("lstrip", &args[0])?.trim_start().to_string(),
@@ -26,7 +91,7 @@ fn truncate(args: &[Value]) -> BuiltinResult {
 
 fn pad_with(args: &[Value], fname: &str, left: bool) -> BuiltinResult {
     let s = expect_string(fname, &args[0])?;
-    let n = expect_number(fname, &args[1])?.max(0.0) as usize;
+    let width = expect_number(fname, &args[1])?;
     let pad: char = if args.len() == 3 {
         let p = expect_string(fname, &args[2])?;
         match p.chars().next() {
@@ -41,6 +106,9 @@ fn pad_with(args: &[Value], fname: &str, left: bool) -> BuiltinResult {
     } else {
         ' '
     };
+    // Width is a character count, but the cap is on bytes, so a
+    // multibyte pad character costs proportionally more.
+    let n = output_len(fname, width, pad.len_utf8())?;
     let cur = s.chars().count();
     if cur >= n {
         return Ok(Value::String(s.to_string()));
@@ -63,21 +131,7 @@ fn pad_right(args: &[Value]) -> BuiltinResult {
 fn repeat(args: &[Value]) -> BuiltinResult {
     let s = expect_string("repeat", &args[0])?;
     let n = expect_number("repeat", &args[1])?;
-    if n < 0.0 {
-        return Err(BuiltinError::ArgError {
-            function: "repeat".into(),
-            message: "count must be non-negative".into(),
-        });
-    }
-    let n = n as usize;
-    // Soft cap so a script can't ask for terabytes.
-    const MAX_OUT: usize = 16 * 1024 * 1024;
-    if s.len().saturating_mul(n) > MAX_OUT {
-        return Err(BuiltinError::Failed {
-            function: "repeat".into(),
-            message: "output would exceed 16 MiB".into(),
-        });
-    }
+    let n = output_len("repeat", n, s.len())?;
     Ok(Value::String(s.repeat(n)))
 }
 
@@ -309,8 +363,25 @@ fn spintax(args: &[Value]) -> BuiltinResult {
 pub fn spintax_with(pat: &str, state: &mut u64) -> String {
     let chars: Vec<char> = pat.chars().collect();
     let mut idx = 0usize;
-    spin_expand(&chars, &mut idx, state, false)
+    spin_expand(&chars, &mut idx, state, false, 0)
 }
+
+/// How deeply `{` groups may nest before further `{` are treated as
+/// ordinary characters.
+///
+/// Expansion recurses once per `{`, on the native stack — the evaluator's
+/// call-depth guard cannot see it, so `--max-call-depth` does not apply
+/// and an embedder has no way to bound it. A pattern of a million open
+/// braces is a plausible stack overflow and, worse, was quadratic: every
+/// level that reaches EOF rebuilds a string containing everything below
+/// it, so 500k braces took 24 seconds and reported seven evaluation
+/// steps.
+///
+/// Capping the depth bounds both. The limit is far above any real
+/// template — nesting past a handful of levels is already unreadable —
+/// and past it a `{` is emitted literally, which is what an unbalanced
+/// pattern already did.
+const MAX_SPIN_DEPTH: usize = 64;
 
 /// SplitMix64 step. Tiny, well-distributed, no allocation, no dependency.
 fn splitmix64_next(state: &mut u64) -> u64 {
@@ -321,15 +392,28 @@ fn splitmix64_next(state: &mut u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn spin_expand(chars: &[char], idx: &mut usize, state: &mut u64, in_group: bool) -> String {
+fn spin_expand(
+    chars: &[char],
+    idx: &mut usize,
+    state: &mut u64,
+    in_group: bool,
+    depth: usize,
+) -> String {
     let mut alternatives: Vec<String> = Vec::new();
     let mut current = String::new();
     while *idx < chars.len() {
         let c = chars[*idx];
         match c {
+            // Past the nesting cap, treat `{` as an ordinary character
+            // rather than recursing. Consistent with how an unbalanced
+            // pattern is already handled: emit it literally.
+            '{' if depth >= MAX_SPIN_DEPTH => {
+                *idx += 1;
+                current.push(c);
+            }
             '{' => {
                 *idx += 1;
-                let inner = spin_expand(chars, idx, state, true);
+                let inner = spin_expand(chars, idx, state, true, depth + 1);
                 current.push_str(&inner);
             }
             '|' if in_group => {
@@ -556,6 +640,168 @@ mod tests {
     fn spintax_unbalanced_open_brace_emits_literally() {
         // Orphan `{` with no `}` shouldn't crash or eat content.
         assert_eq!(spin("hello {there", 0), "hello {there");
+    }
+
+    #[test]
+    fn spintax_bounds_nesting_depth() {
+        // Recursion here is on the native stack, where the evaluator's
+        // depth guard cannot reach. Past the cap a `{` is an ordinary
+        // character, so a pathological pattern returns instead of
+        // overflowing — this used to be quadratic and did not finish.
+        let deep = "{".repeat(1_000_000);
+        let out = spin(&deep, 1);
+        assert_eq!(
+            out.len(),
+            1_000_000,
+            "every brace past the cap should survive as a literal"
+        );
+    }
+
+    #[test]
+    fn spintax_still_nests_up_to_the_cap() {
+        // A group nested just under the cap must still expand normally.
+        let depth = MAX_SPIN_DEPTH - 1;
+        let pat = format!("{}{}{}", "{".repeat(depth), "a|a", "}".repeat(depth));
+        assert_eq!(spin(&pat, 3), "a");
+    }
+
+    fn count_err(f: fn(&[Value]) -> BuiltinResult, s: &str, n: f64) -> BuiltinError {
+        f(&[Value::String(s.into()), Value::from(n)]).unwrap_err()
+    }
+
+    #[test]
+    fn repeat_rejects_sizes_it_cannot_allocate() {
+        // `f64 as usize` saturates, so an enormous count silently became
+        // `usize::MAX` and was handed to the allocator.
+        for n in [1e15, 1e308] {
+            assert!(
+                matches!(count_err(repeat, "ab", n), BuiltinError::Failed { .. }),
+                "repeat accepted a count of {n}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeat_rejects_negative_counts() {
+        assert!(matches!(
+            count_err(repeat, "ab", -1.0),
+            BuiltinError::ArgError { .. }
+        ));
+    }
+
+    #[test]
+    fn pad_rejects_widths_it_cannot_allocate() {
+        // These aborted the process: 1e15 asked the allocator for a
+        // petabyte, 1e308 overflowed the usize conversion in raw_vec.
+        for f in [pad_left, pad_right] {
+            for n in [1e15, 1e308] {
+                assert!(
+                    matches!(count_err(f, "x", n), BuiltinError::Failed { .. }),
+                    "pad accepted a width of {n}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn output_len_rejects_non_finite_counts() {
+        // NaN and the infinities cannot reach a builtin through a
+        // `Value` — JSON has no encoding for them, so `Value::from`
+        // yields null and `expect_number` rejects it first. The guard is
+        // still checked directly, since `output_len` is the single place
+        // a size is approved and it should not depend on that.
+        //
+        // NaN matters most: it fails a `< 0.0` test, so the old code let
+        // it through and converted it to 0, turning an error into a
+        // silently empty string.
+        assert!(matches!(
+            output_len("f", f64::NAN, 1),
+            Err(BuiltinError::ArgError { .. })
+        ));
+        assert!(matches!(
+            output_len("f", f64::INFINITY, 1),
+            Err(BuiltinError::Failed { .. })
+        ));
+        assert!(matches!(
+            output_len("f", f64::NEG_INFINITY, 1),
+            Err(BuiltinError::ArgError { .. })
+        ));
+    }
+
+    #[test]
+    fn output_len_accepts_sizes_up_to_the_cap() {
+        const MAX_OUT: usize = crate::output_limit::DEFAULT_MAX_OUT;
+        assert_eq!(output_len("f", 0.0, 1).unwrap(), 0);
+        assert_eq!(output_len("f", MAX_OUT as f64, 1).unwrap(), MAX_OUT);
+        assert!(output_len("f", MAX_OUT as f64 + 1.0, 1).is_err());
+        // The unit multiplies: half the cap at two bytes each is exactly
+        // the cap, one more element is over it.
+        assert_eq!(
+            output_len("f", (MAX_OUT / 2) as f64, 2).unwrap(),
+            MAX_OUT / 2
+        );
+        assert!(output_len("f", (MAX_OUT / 2) as f64 + 1.0, 2).is_err());
+    }
+
+    #[test]
+    fn output_len_follows_the_configured_ceiling() {
+        // The whole point of making it configurable: a tight budget must
+        // reject a size the 16 MiB default would have allowed.
+        crate::output_limit::with_limit(1024, || {
+            assert_eq!(output_len("f", 1024.0, 1).unwrap(), 1024);
+            assert!(output_len("f", 1025.0, 1).is_err());
+            // Well under the old hardcoded cap, still rejected.
+            assert!(output_len("f", 1_000_000.0, 1).is_err());
+        });
+    }
+
+    #[test]
+    fn repeat_follows_the_configured_ceiling() {
+        let call = |n: i64| repeat(&[Value::String("x".into()), Value::from(n)]);
+        crate::output_limit::with_limit(64, || {
+            assert!(call(64).is_ok());
+            assert!(call(65).is_err());
+        });
+        // Outside the scope the default applies again.
+        assert!(call(65).is_ok());
+    }
+
+    #[test]
+    fn oversize_error_names_the_configured_ceiling() {
+        crate::output_limit::with_limit(2048, || {
+            let e = output_len("f", 1e9, 1).unwrap_err();
+            assert!(
+                e.to_string().contains("2 KiB"),
+                "error should name the active ceiling, got: {e}"
+            );
+        });
+    }
+
+    #[test]
+    fn pad_still_pads_ordinary_widths() {
+        let got = pad_left(&[Value::String("5".into()), Value::from(3)]).unwrap();
+        assert_eq!(got, Value::String("  5".into()));
+        let got = pad_right(&[
+            Value::String("ab".into()),
+            Value::from(5),
+            Value::String(".".into()),
+        ])
+        .unwrap();
+        assert_eq!(got, Value::String("ab...".into()));
+    }
+
+    #[test]
+    fn pad_charges_multibyte_pad_characters_by_byte() {
+        // The cap is on bytes, so a 4-byte pad character reaches it at a
+        // quarter of the character width a 1-byte one would.
+        let width = (crate::output_limit::DEFAULT_MAX_OUT / 2) as f64;
+        let err = pad_left(&[
+            Value::String("x".into()),
+            Value::from(width),
+            Value::String("\u{1F600}".into()),
+        ])
+        .unwrap_err();
+        assert!(matches!(err, BuiltinError::Failed { .. }));
     }
 }
 

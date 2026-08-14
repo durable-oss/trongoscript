@@ -166,7 +166,10 @@ fn thread_first_threads_as_first_arg() {
 #[test]
 fn thread_last_threads_as_last_arg() {
     // (1 - (100 - 5)) = -94
-    assert_eq!(eval_str("(->> 5 (- 100) (- 1))"), Value::Number((-94).into()));
+    assert_eq!(
+        eval_str("(->> 5 (- 100) (- 1))"),
+        Value::Number((-94).into())
+    );
     // last arg position: (- 3 10) = -7
     assert_eq!(eval_str("(->> 10 (- 3))"), Value::Number((-7).into()));
 }

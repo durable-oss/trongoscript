@@ -52,6 +52,7 @@
 pub mod embed;
 pub mod error;
 pub mod eval;
+pub mod fuel;
 pub mod higher_order;
 pub mod modules;
 pub mod rng;
@@ -73,6 +74,7 @@ pub use eval::{
     call_closure, call_fn, eval, eval_module, eval_source, partial_eval, value_to_expr, Closure,
     Context, EvalConfig, HostBuiltin, MacroDef, Partial,
 };
+pub use fuel::{Fuel, FuelLimits};
 pub use sandbox::{Mount, Sandbox, SandboxError, SandboxLimits};
 pub use template::{render, render_template};
 pub use trongoscript_parser::{

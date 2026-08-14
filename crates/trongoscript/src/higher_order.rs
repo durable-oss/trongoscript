@@ -94,7 +94,73 @@ pub fn try_dispatch(
 
         _ => return None,
     };
+    // Backstop charge for the assembled result.
+    //
+    // The collecting forms below bill each element as they build (see
+    // `Collector`), which is what stops an oversized result before the
+    // memory is committed. This catches whatever returns a list without
+    // going through one — the slicing forms, and anything added later.
+    // Double-charging a collected list is deliberate: over-charging can
+    // only stop a script early, while under-charging is the failure mode
+    // that gets a process OOM-killed.
+    let r = r.and_then(|out| {
+        ctx.fuel.charge_value(&out)?;
+        Ok(out)
+    });
     Some(r)
+}
+
+/// A result list that charges the allocation budget as it grows.
+///
+/// Nothing used to bill these forms for what they produced:
+/// `call_closure` charges *steps* for copying an argument in, but no one
+/// charged *bytes* for the list coming out. A closure returning the same
+/// large captured value each time made that visible — `(let [big (repeat
+/// "x" 1000000)] (map (fn [i] big) (range 2000)))` allocated about 2 GB
+/// and reported about 1 MB, leaving `--max-alloc` unable to see it and a
+/// tight `RLIMIT_AS` to abort the process instead.
+///
+/// The charge has to happen per element rather than on the finished list.
+/// Billing at the end is the mistake the metering here keeps having to
+/// unlearn: by then the allocation already happened, so an oversized
+/// result is reported only if the process survived making it.
+///
+/// Each element is counted as it appears, so a value pushed n times costs
+/// n times its size. That is what the process actually allocates, and
+/// what an out-of-memory kill responds to.
+struct Collector {
+    out: Vec<Value>,
+}
+
+impl Collector {
+    fn new() -> Self {
+        Collector { out: Vec::new() }
+    }
+
+    fn with_capacity(n: usize) -> Self {
+        Collector {
+            out: Vec::with_capacity(n),
+        }
+    }
+
+    /// Charge for `v`, then append it.
+    fn push(&mut self, v: Value, ctx: &mut Context) -> EvalResult<()> {
+        ctx.fuel.charge_alloc(crate::fuel::value_cost(&v))?;
+        self.out.push(v);
+        Ok(())
+    }
+
+    /// Charge for every element of `vs`, then append them all.
+    fn extend(&mut self, vs: impl IntoIterator<Item = Value>, ctx: &mut Context) -> EvalResult<()> {
+        for v in vs {
+            self.push(v, ctx)?;
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Value {
+        Value::Array(self.out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,11 +224,12 @@ fn map_(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let xs = eval(&arg_exprs[1], ctx)?;
     let handle = coerce_to_fn("map", &f)?;
     let items = coerce_to_list("map", &xs)?;
-    let mut out = Vec::with_capacity(items.len());
+    let mut out = Collector::with_capacity(items.len());
     for it in items {
-        out.push(call_closure(handle, &[it], ctx)?);
+        let v = call_closure(handle, &[it], ctx)?;
+        out.push(v, ctx)?;
     }
-    Ok(Value::Array(out))
+    Ok(out.finish())
 }
 
 /// Call `f` on each element for side-effect; return the original list.
@@ -186,12 +253,17 @@ fn maplist(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let xs = eval(&arg_exprs[1], ctx)?;
     let handle = coerce_to_fn("maplist", &f)?;
     let items = coerce_to_list("maplist", &xs)?;
-    let mut out = Vec::with_capacity(items.len());
+    let mut out = Collector::with_capacity(items.len());
     for i in 0..items.len() {
+        // Each suffix is a fresh copy, so this loop allocates O(n^2) even
+        // though it makes only n calls. Charge the copy explicitly.
         let suffix = Value::Array(items[i..].to_vec());
-        out.push(call_closure(handle, &[suffix], ctx)?);
+        ctx.fuel
+            .charge_alloc(crate::fuel::container_overhead(items.len() - i))?;
+        let v = call_closure(handle, &[suffix], ctx)?;
+        out.push(v, ctx)?;
     }
-    Ok(Value::Array(out))
+    Ok(out.finish())
 }
 
 /// `mapl`: like `maplist` but for side-effect; returns the original list.
@@ -203,6 +275,8 @@ fn mapl(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let items = coerce_to_list("mapl", &xs)?;
     for i in 0..items.len() {
         let suffix = Value::Array(items[i..].to_vec());
+        ctx.fuel
+            .charge_alloc(crate::fuel::container_overhead(items.len() - i))?;
         call_closure(handle, &[suffix], ctx)?;
     }
     Ok(Value::Array(items))
@@ -216,13 +290,13 @@ fn mapcan(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let xs = eval(&arg_exprs[1], ctx)?;
     let handle = coerce_to_fn("mapcan", &f)?;
     let items = coerce_to_list("mapcan", &xs)?;
-    let mut out: Vec<Value> = Vec::new();
+    let mut out = Collector::new();
     for it in items {
         let part = call_closure(handle, &[it], ctx)?;
-        let mut piece = coerce_to_list("mapcan", &part)?;
-        out.append(&mut piece);
+        let piece = coerce_to_list("mapcan", &part)?;
+        out.extend(piece, ctx)?;
     }
-    Ok(Value::Array(out))
+    Ok(out.finish())
 }
 
 /// `mapcon`: like `maplist` but concatenate. Each call must return a list.
@@ -232,14 +306,16 @@ fn mapcon(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let xs = eval(&arg_exprs[1], ctx)?;
     let handle = coerce_to_fn("mapcon", &f)?;
     let items = coerce_to_list("mapcon", &xs)?;
-    let mut out: Vec<Value> = Vec::new();
+    let mut out = Collector::new();
     for i in 0..items.len() {
         let suffix = Value::Array(items[i..].to_vec());
+        ctx.fuel
+            .charge_alloc(crate::fuel::container_overhead(items.len() - i))?;
         let part = call_closure(handle, &[suffix], ctx)?;
-        let mut piece = coerce_to_list("mapcon", &part)?;
-        out.append(&mut piece);
+        let piece = coerce_to_list("mapcon", &part)?;
+        out.extend(piece, ctx)?;
     }
-    Ok(Value::Array(out))
+    Ok(out.finish())
 }
 
 fn filter_(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
@@ -506,6 +582,11 @@ fn subst_walk(
     invert: bool,
 ) -> EvalResult<Value> {
     if pred_holds(handle, &node, ctx, invert)? {
+        // The replacement can be arbitrarily large and is substituted once
+        // per matching node, so a small tree and a big `new_v` amplify.
+        // Charge each copy as it is made rather than billing the finished
+        // tree, which would only report a result the process survived.
+        ctx.fuel.charge_alloc(crate::fuel::value_cost(new_v))?;
         return Ok(new_v.clone());
     }
     match node {
@@ -539,15 +620,20 @@ fn substitute_if(arg_exprs: &[Expr], ctx: &mut Context, invert: bool) -> EvalRes
     let xs = eval(&arg_exprs[2], ctx)?;
     let handle = coerce_to_fn(fname, &pred)?;
     let items = coerce_to_list(fname, &xs)?;
-    let mut out = Vec::with_capacity(items.len());
+    // Same amplification as `subst-if`: one large replacement can be
+    // copied once per element, so the collector charges each copy as it
+    // lands. Elements kept from the input cost their own size, which is
+    // already accounted for, but charging them again is the safe
+    // direction — it can only stop a script early.
+    let mut out = Collector::with_capacity(items.len());
     for it in items {
         if pred_holds(handle, &it, ctx, invert)? {
-            out.push(new_v.clone());
+            out.push(new_v.clone(), ctx)?;
         } else {
-            out.push(it);
+            out.push(it, ctx)?;
         }
     }
-    Ok(Value::Array(out))
+    Ok(out.finish())
 }
 
 // ---------------------------------------------------------------------------
@@ -658,18 +744,35 @@ fn complement(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
 //
 // Equality here is structural Value equality (serde_json's PartialEq).
 // CL's optional `:test` / `:key` keywords are not supported.
+//
+// Membership goes through `value_key::ValueSet` rather than a scan. The
+// scan version was O(n^2) with a deep comparison at each step, and since
+// each of these is a single dispatch the evaluator charged it one step:
+// `remove-duplicates` over 120k elements took 16.6 seconds and reported
+// four. The set makes the work linear, and `charge_scan` bills it so a
+// step budget can see what remains.
 // ---------------------------------------------------------------------------
+
+/// Charge the evaluator for key-building work done inside one of these
+/// calls.
+///
+/// Without this the cost is invisible: the whole pass is one dispatch, so
+/// the step counter bills it once no matter how much data moved through.
+/// Nodes are charged at a fraction of a step, since walking one node is
+/// far cheaper than evaluating an expression, but the charge still grows
+/// with the input so a budget bounds it.
+fn charge_scan(ctx: &mut Context, nodes: u64) -> EvalResult<()> {
+    /// Nodes walked per step charged.
+    const NODES_PER_STEP: u64 = 8;
+    ctx.fuel.charge_steps(nodes / NODES_PER_STEP)
+}
 
 fn remove_duplicates(arg_exprs: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     arity_exact("remove-duplicates", 1, arg_exprs.len())?;
     let xs = eval(&arg_exprs[0], ctx)?;
     let items = coerce_to_list("remove-duplicates", &xs)?;
-    let mut out: Vec<Value> = Vec::new();
-    for it in items {
-        if !out.iter().any(|prev| prev == &it) {
-            out.push(it);
-        }
-    }
+    let (out, nodes) = trongoscript_stdlib::value_key::dedup_values(&items);
+    charge_scan(ctx, nodes)?;
     Ok(Value::Array(out))
 }
 
@@ -688,64 +791,72 @@ enum SetOp {
 }
 
 fn set_op(arg_exprs: &[Expr], ctx: &mut Context, fname: &str, op: SetOp) -> EvalResult<Value> {
+    use trongoscript_stdlib::value_key::ValueSet;
+
     arity_exact(fname, 2, arg_exprs.len())?;
     let a = eval(&arg_exprs[0], ctx)?;
     let b = eval(&arg_exprs[1], ctx)?;
     let a_items = coerce_to_list(fname, &a)?;
     let b_items = coerce_to_list(fname, &b)?;
-    let contains = |hay: &[Value], needle: &Value| hay.iter().any(|x| x == needle);
-    let out: Vec<Value> = match op {
+
+    // `emitted` replaces the "not already in `out`" scan; the membership
+    // sets replace the scans over the opposite input. Output order is
+    // unchanged from the scan version: first-seen order within A, then
+    // within B.
+    let mut emitted = ValueSet::with_capacity(a_items.len());
+    let mut out: Vec<Value> = Vec::new();
+    let mut nodes: u64 = 0;
+
+    match op {
         // Union: every element of A, then elements of B not already in A.
         SetOp::Union => {
-            let mut out: Vec<Value> = Vec::new();
-            for x in &a_items {
-                if !contains(&out, x) {
+            for x in a_items.iter().chain(b_items.iter()) {
+                if emitted.insert(x) {
                     out.push(x.clone());
                 }
             }
-            for x in &b_items {
-                if !contains(&out, x) {
-                    out.push(x.clone());
-                }
-            }
-            out
         }
         // Intersection: elements of A also in B (dedup, order from A).
         SetOp::Intersection => {
-            let mut out: Vec<Value> = Vec::new();
+            let mut in_b = ValueSet::from_values(b_items.iter());
             for x in &a_items {
-                if contains(&b_items, x) && !contains(&out, x) {
+                if in_b.contains(x) && emitted.insert(x) {
                     out.push(x.clone());
                 }
             }
-            out
+            nodes = nodes.saturating_add(in_b.nodes_walked());
         }
         // Difference: elements of A not in B.
         SetOp::Difference => {
-            let mut out: Vec<Value> = Vec::new();
+            let mut in_b = ValueSet::from_values(b_items.iter());
             for x in &a_items {
-                if !contains(&b_items, x) && !contains(&out, x) {
+                if !in_b.contains(x) && emitted.insert(x) {
                     out.push(x.clone());
                 }
             }
-            out
+            nodes = nodes.saturating_add(in_b.nodes_walked());
         }
         // Exclusive-or: (A ∪ B) − (A ∩ B).
         SetOp::ExclusiveOr => {
-            let mut out: Vec<Value> = Vec::new();
+            let mut in_a = ValueSet::from_values(a_items.iter());
+            let mut in_b = ValueSet::from_values(b_items.iter());
             for x in &a_items {
-                if !contains(&b_items, x) && !contains(&out, x) {
+                if !in_b.contains(x) && emitted.insert(x) {
                     out.push(x.clone());
                 }
             }
             for x in &b_items {
-                if !contains(&a_items, x) && !contains(&out, x) {
+                if !in_a.contains(x) && emitted.insert(x) {
                     out.push(x.clone());
                 }
             }
-            out
+            nodes = nodes
+                .saturating_add(in_a.nodes_walked())
+                .saturating_add(in_b.nodes_walked());
         }
-    };
+    }
+
+    charge_scan(ctx, nodes.saturating_add(emitted.nodes_walked()))?;
     Ok(Value::Array(out))
 }
 

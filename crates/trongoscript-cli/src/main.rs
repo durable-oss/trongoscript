@@ -32,7 +32,7 @@ use anyhow::{anyhow, Context as _, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use trongoscript::{
     eval_source, evaluate_embedded, evaluate_embedded_yaml, render_template, Context, EvalConfig,
-    Sandbox, Value,
+    FuelLimits, Sandbox, Value,
 };
 
 #[derive(Parser, Debug)]
@@ -56,6 +56,79 @@ enum Command {
     Reference,
 }
 
+/// Resource ceilings, shared by every command that evaluates.
+///
+/// Defaults come from [`FuelLimits::default`] and are generous enough that
+/// ordinary scripts never notice. Lower them when evaluating input you did
+/// not write.
+#[derive(Parser, Debug, Clone)]
+struct FuelArgs {
+    /// Apply tight resource limits suitable for untrusted input.
+    /// Individual --max-* flags still override the preset.
+    #[arg(long)]
+    untrusted: bool,
+    /// Remove the step and allocation budgets. Recursion depth stays
+    /// capped: exceeding the native stack crashes the process instead of
+    /// erroring, so it is not something a flag can turn off. A script run
+    /// this way can loop forever; only use it on input you trust.
+    #[arg(long, conflicts_with = "untrusted")]
+    no_limits: bool,
+    /// Maximum evaluation steps before aborting.
+    #[arg(long, value_name = "N")]
+    max_steps: Option<u64>,
+    /// Maximum nested function call depth. Capped at what the native
+    /// stack can survive, since exceeding it would crash rather than error.
+    #[arg(long, value_name = "N")]
+    max_call_depth: Option<usize>,
+    /// Maximum expression/data nesting depth. Capped for the same reason
+    /// as --max-call-depth.
+    #[arg(long, value_name = "N")]
+    max_eval_depth: Option<usize>,
+    /// Maximum elements (or string bytes) in a single value.
+    #[arg(long, value_name = "N")]
+    max_value_len: Option<usize>,
+    /// Maximum cumulative allocation in bytes.
+    #[arg(long, value_name = "BYTES")]
+    max_alloc: Option<u64>,
+    /// Print steps and bytes consumed to stderr after evaluating.
+    #[arg(long)]
+    report_fuel: bool,
+}
+
+impl FuelArgs {
+    fn limits(&self) -> FuelLimits {
+        let mut l = if self.no_limits {
+            FuelLimits::unlimited()
+        } else if self.untrusted {
+            FuelLimits::strict()
+        } else {
+            FuelLimits::default()
+        };
+        if let Some(v) = self.max_steps {
+            l.max_steps = v;
+        }
+        if let Some(v) = self.max_call_depth {
+            l.max_call_depth = v;
+        }
+        if let Some(v) = self.max_eval_depth {
+            l.max_eval_depth = v;
+        }
+        if let Some(v) = self.max_value_len {
+            l.max_value_len = v;
+        }
+        if let Some(v) = self.max_alloc {
+            l.max_total_alloc = v;
+        }
+        // Depth flags are clamped to what the native stack can survive.
+        // A caller asking for a million frames is asking for a SIGSEGV,
+        // which no exit code can report — so the request is capped. Step
+        // and allocation budgets are left exactly as given: those fail
+        // safely, and how long a trusted script may run is the operator's
+        // decision, not ours.
+        l.clamp_to_stack_safe()
+    }
+}
+
 #[derive(Parser, Debug)]
 struct EvalArgs {
     /// Source file. Use `-` for stdin (the default if omitted).
@@ -76,6 +149,8 @@ struct EvalArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
     format: OutputFormat,
+    #[command(flatten)]
+    fuel: FuelArgs,
 }
 
 #[derive(Parser, Debug)]
@@ -89,6 +164,8 @@ struct RenderArgs {
     mounts: Vec<String>,
     #[arg(long)]
     seed: Option<u64>,
+    #[command(flatten)]
+    fuel: FuelArgs,
 }
 
 #[derive(Parser, Debug)]
@@ -106,6 +183,8 @@ struct EmbedArgs {
     mounts: Vec<String>,
     #[arg(long)]
     seed: Option<u64>,
+    #[command(flatten)]
+    fuel: FuelArgs,
 }
 
 #[derive(Parser, Debug)]
@@ -154,9 +233,66 @@ impl From<Format> for OutputFormat {
     }
 }
 
-fn main() -> Result<()> {
+/// Stack reserved for the interpreter thread.
+///
+/// The evaluator recurses on the native stack, so the depth a script may
+/// reach is bounded by whatever stack it runs on. The main thread's is
+/// whatever the OS chose (commonly 8 MiB, but as little as 512 KiB under
+/// some launchers), and a debug build's frames are large enough that even
+/// 8 MiB only affords a few hundred frames.
+///
+/// Running evaluation on a thread with an explicit, generous stack makes
+/// the usable recursion depth a property of this program rather than of
+/// the build profile and the launcher — so the fuel ceilings can be set
+/// where they serve users, not where the weakest possible stack forces
+/// them.
+/// Stack sizes to try for the interpreter thread, largest first.
+///
+/// A thread's stack is reserved address space, so the largest size fails
+/// outright under a tight `RLIMIT_AS` — in a memory-capped container, for
+/// instance. Falling back keeps the CLI usable there instead of refusing
+/// to start; the only cost is a shallower safe recursion depth, which the
+/// fuel limits already bound independently.
+const INTERPRETER_STACK_SIZES: [usize; 4] = [
+    256 * 1024 * 1024,
+    64 * 1024 * 1024,
+    16 * 1024 * 1024,
+    4 * 1024 * 1024,
+];
+
+fn main() -> std::process::ExitCode {
+    // Evaluate on an explicitly-sized stack; see INTERPRETER_STACK_SIZES.
+    let mut last_err = None;
+    for size in INTERPRETER_STACK_SIZES {
+        match std::thread::Builder::new()
+            .name("trongo-eval".into())
+            .stack_size(size)
+            .spawn(run)
+        {
+            Ok(handle) => {
+                return match handle.join() {
+                    Ok(code) => code,
+                    // The interpreter thread panicked; it has already
+                    // printed its own message via the default hook.
+                    Err(_) => std::process::ExitCode::FAILURE,
+                };
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    // Every size failed — the process is too constrained to run at all.
+    // Fall back to the main thread rather than refusing outright.
+    if let Some(e) = last_err {
+        eprintln!(
+            "warning: could not reserve an interpreter stack ({e}); running on the main thread"
+        );
+    }
+    run()
+}
+
+fn run() -> std::process::ExitCode {
     let cli = Cli::parse();
-    match cli.command {
+    let result = match cli.command {
         Command::Eval(a) => cmd_eval(a),
         Command::Render(a) => cmd_render(a),
         Command::Embed(a) => cmd_embed(a),
@@ -165,23 +301,83 @@ fn main() -> Result<()> {
             print_help();
             Ok(())
         }
+    };
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {:#}", e);
+            if e.chain().any(|c| c.is::<ResourceLimitHit>()) {
+                std::process::ExitCode::from(EXIT_RESOURCE_LIMIT as u8)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
     }
 }
 
 fn cmd_eval(a: EvalArgs) -> Result<()> {
     let source = read_source(a.input.as_deref())?;
-    let mut ctx = make_context(a.root.as_deref(), &a.mounts, a.seed)?;
-    let value = eval_source(&source, &mut ctx).map_err(|e| anyhow!("{}", e))?;
+    let mut ctx = make_context(a.root.as_deref(), &a.mounts, a.seed, &a.fuel)?;
+    let value = eval_source(&source, &mut ctx).map_err(classify_eval_error)?;
+    report_fuel(&ctx, &a.fuel);
     write_value(&value, a.format)
 }
 
 fn cmd_render(a: RenderArgs) -> Result<()> {
     let source = read_source(a.input.as_deref())?;
-    let mut ctx = make_context(a.root.as_deref(), &a.mounts, a.seed)?;
-    let out = render_template(&source, &mut ctx).map_err(|e| anyhow!("{}", e))?;
+    let mut ctx = make_context(a.root.as_deref(), &a.mounts, a.seed, &a.fuel)?;
+    let out = render_template(&source, &mut ctx).map_err(classify_eval_error)?;
+    report_fuel(&ctx, &a.fuel);
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(out.as_bytes())?;
     Ok(())
+}
+
+/// Exit code used when evaluation stopped because it hit a resource
+/// ceiling rather than because the script was wrong. Distinct from the
+/// generic failure code so callers can tell "too expensive" from "broken"
+/// without parsing the message.
+const EXIT_RESOURCE_LIMIT: i32 = 3;
+
+/// Error carrying the fact that evaluation stopped on a resource ceiling.
+///
+/// Kept as its own type (rather than an `anyhow` context string) so `main`
+/// can recognize it by type and pick the exit code without matching on
+/// message text.
+#[derive(Debug)]
+struct ResourceLimitHit(String);
+
+impl std::fmt::Display for ResourceLimitHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "resource limit exceeded: {}", self.0)
+    }
+}
+
+impl std::error::Error for ResourceLimitHit {}
+
+/// Wrap an evaluation error, tagging resource-limit failures so `main` can
+/// give them their own exit code.
+fn classify_eval_error(e: trongoscript::EvalError) -> anyhow::Error {
+    if e.is_resource_limit() {
+        anyhow::Error::new(ResourceLimitHit(e.to_string()))
+    } else {
+        anyhow!("{}", e)
+    }
+}
+
+/// Print consumption to stderr when `--report-fuel` was passed. Goes to
+/// stderr so it never contaminates the evaluated output on stdout.
+fn report_fuel(ctx: &Context, fuel: &FuelArgs) {
+    if !fuel.report_fuel {
+        return;
+    }
+    eprintln!(
+        "fuel: steps={} allocated={} peak_call_depth={} peak_eval_depth={}",
+        ctx.fuel.steps(),
+        ctx.fuel.allocated(),
+        ctx.fuel.peak_call_depth(),
+        ctx.fuel.peak_eval_depth(),
+    );
 }
 
 fn cmd_embed(a: EmbedArgs) -> Result<()> {
@@ -193,19 +389,20 @@ fn cmd_embed(a: EmbedArgs) -> Result<()> {
         })?;
     let raw = std::fs::read_to_string(&a.input)
         .with_context(|| format!("reading {}", a.input.display()))?;
-    let mut ctx = make_context(a.root.as_deref(), &a.mounts, a.seed)?;
+    let mut ctx = make_context(a.root.as_deref(), &a.mounts, a.seed, &a.fuel)?;
     let out = match format {
         Format::Yaml => {
             // Use the YAML-aware path so `!trongo` tags are honored as real
             // YAML tags (rather than being lost in the json conversion).
             let y: serde_yaml::Value = serde_yaml::from_str(&raw).context("parsing YAML")?;
-            evaluate_embedded_yaml(y, &mut ctx).map_err(|e| anyhow!("{}", e))?
+            evaluate_embedded_yaml(y, &mut ctx).map_err(classify_eval_error)?
         }
         _ => {
             let value = parse_document(&raw, format)?;
-            evaluate_embedded(value, &mut ctx).map_err(|e| anyhow!("{}", e))?
+            evaluate_embedded(value, &mut ctx).map_err(classify_eval_error)?
         }
     };
+    report_fuel(&ctx, &a.fuel);
     write_value(&out, format.into())
 }
 
@@ -246,8 +443,9 @@ fn make_context(
     root: Option<&std::path::Path>,
     mounts: &[String],
     seed: Option<u64>,
+    fuel: &FuelArgs,
 ) -> Result<Context> {
-    let mut cfg = EvalConfig::default();
+    let mut cfg = EvalConfig::default().with_fuel_limits(fuel.limits());
     if let Some(r) = root {
         let mut sb =
             Sandbox::new(r).with_context(|| format!("opening sandbox root {}", r.display()))?;

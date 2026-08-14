@@ -75,6 +75,16 @@ fn cons(args: &[Value]) -> BuiltinResult {
 }
 
 fn conj(args: &[Value]) -> BuiltinResult {
+    // Registered variadic, which means `min_args = 0` — the evaluator's
+    // arity check cannot reject `(conj)`, so the body must. Without this,
+    // the indexing below panics and takes the process down, and it is
+    // reachable from `embed` as well as `eval`.
+    if args.is_empty() {
+        return Err(BuiltinError::ArgError {
+            function: "conj".into(),
+            message: "expected (conj coll v ...) with at least 1 argument".into(),
+        });
+    }
     let a = expect_array("conj", &args[0])?;
     let mut out = a.clone();
     for v in &args[1..] {

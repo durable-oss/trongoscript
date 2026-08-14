@@ -25,10 +25,47 @@ fn cbrt(args: &[Value]) -> BuiltinResult {
     Ok(num_from_f64(expect_number("cbrt", &args[0])?.cbrt()))
 }
 
+/// Report a result JSON cannot represent, instead of silently nulling it.
+///
+/// [`num_from_f64`] maps both infinity and NaN to `Value::Null`, because
+/// JSON can encode neither. That is the right *serialization* and the
+/// wrong *answer*: a function that was asked to compute something returns
+/// a null indistinguishable from a legitimate one, and the failure is
+/// lost.
+///
+/// `sqrt` and the logarithms check their domain before computing, which
+/// is better because the error can name the actual problem. The functions
+/// here cannot: whether `pow` overflows depends on both arguments
+/// together, and `asin`/`acos` produce NaN across an entire region rather
+/// than at a checkable boundary. So they check the result instead.
+///
+/// Finite results pass through unchanged.
+fn finite_or_undefined(fname: &str, n: f64) -> BuiltinResult {
+    if n.is_infinite() {
+        return Err(BuiltinError::Failed {
+            function: fname.into(),
+            message: format!(
+                "result overflowed to {}infinity, which JSON cannot represent",
+                if n.is_sign_negative() { "-" } else { "" }
+            ),
+        });
+    }
+    if n.is_nan() {
+        return Err(BuiltinError::Failed {
+            function: fname.into(),
+            message: "result is undefined (argument outside the function's domain)".into(),
+        });
+    }
+    Ok(num_from_f64(n))
+}
+
 fn pow(args: &[Value]) -> BuiltinResult {
     let x = expect_number("pow", &args[0])?;
     let y = expect_number("pow", &args[1])?;
-    Ok(num_from_f64(x.powf(y)))
+    // Covers `(pow 10 100000)`, which overflows the exponent range;
+    // `(pow 0 -1)`, a division by zero in disguise; and `(pow -1 0.5)`,
+    // which has no real result and yields NaN.
+    finite_or_undefined("pow", x.powf(y))
 }
 
 fn ln(args: &[Value]) -> BuiltinResult {
@@ -65,7 +102,7 @@ fn log2(args: &[Value]) -> BuiltinResult {
 }
 
 fn exp(args: &[Value]) -> BuiltinResult {
-    Ok(num_from_f64(expect_number("exp", &args[0])?.exp()))
+    finite_or_undefined("exp", expect_number("exp", &args[0])?.exp())
 }
 
 fn sin(args: &[Value]) -> BuiltinResult {
@@ -77,11 +114,26 @@ fn cos(args: &[Value]) -> BuiltinResult {
 fn tan(args: &[Value]) -> BuiltinResult {
     Ok(num_from_f64(expect_number("tan", &args[0])?.tan()))
 }
+/// `asin` and `acos` are defined only on [-1, 1]. Outside it they yield
+/// NaN, which serializes as `null` — the same silent loss `pow` had. The
+/// domain is checkable up front, so check it there: the error can then
+/// name the actual problem rather than reporting an undefined result.
+fn unit_interval_arg(fname: &str, args: &[Value]) -> Result<f64, BuiltinError> {
+    let x = expect_number(fname, &args[0])?;
+    if !(-1.0..=1.0).contains(&x) {
+        return Err(BuiltinError::Failed {
+            function: fname.into(),
+            message: format!("{fname} is undefined outside [-1, 1], got {x}"),
+        });
+    }
+    Ok(x)
+}
+
 fn asin(args: &[Value]) -> BuiltinResult {
-    Ok(num_from_f64(expect_number("asin", &args[0])?.asin()))
+    Ok(num_from_f64(unit_interval_arg("asin", args)?.asin()))
 }
 fn acos(args: &[Value]) -> BuiltinResult {
-    Ok(num_from_f64(expect_number("acos", &args[0])?.acos()))
+    Ok(num_from_f64(unit_interval_arg("acos", args)?.acos()))
 }
 fn atan(args: &[Value]) -> BuiltinResult {
     Ok(num_from_f64(expect_number("atan", &args[0])?.atan()))

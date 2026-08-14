@@ -41,6 +41,8 @@ pub enum ParseError {
     Trailing { offset: usize, snippet: String },
     #[error("reader macro `{name}` failed: {message}")]
     ReaderMacro { name: String, message: String },
+    #[error("input nests more than {max} levels deep")]
+    TooDeep { max: usize },
 }
 
 /// Return type of a custom reader macro: the parsed expression plus the
@@ -89,6 +91,67 @@ impl ParserOptions {
 
 thread_local! {
     static PARSER_OPTIONS: RefCell<Option<ParserOptions>> = const { RefCell::new(None) };
+    /// Current nesting depth inside [`form`]. See [`MAX_NESTING_DEPTH`].
+    static NESTING_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Maximum nesting depth the parser will descend to.
+///
+/// The parser is recursive-descent: every nested list, vector, map, or
+/// quote costs native stack frames. Without a limit, input like fifty
+/// thousand consecutive `[` overflows the stack and aborts the process
+/// before the evaluator — and therefore before any evaluation fuel limit —
+/// ever runs.
+///
+/// # Why this number
+///
+/// [`parse_module`] is public API and may be called from any thread, so
+/// this limit has to hold on the *smallest* stack a caller might have, not
+/// on the large one the CLI reserves for evaluation. Measured with a debug
+/// build on a 2 MiB thread stack (Rust's default for spawned threads):
+/// parsing survives 256 levels and overflows at 512.
+///
+/// Real data does not nest 256 levels deep. Source that does is either
+/// machine-generated pathology or an attack, and either way the honest
+/// answer is an error rather than a guess about how much stack is left.
+///
+/// This is a fixed constant rather than a configurable limit because it
+/// guards the parser, which runs before any evaluation config exists.
+pub const MAX_NESTING_DEPTH: usize = 256;
+
+/// Run `f` one nesting level deeper, failing if that exceeds
+/// [`MAX_NESTING_DEPTH`].
+///
+/// The depth is restored on every path out, including the error path, so
+/// sibling forms at the same level do not accumulate depth between them.
+fn nested<'a, T>(input: &'a str, f: impl FnOnce(&'a str) -> PResult<'a, T>) -> PResult<'a, T> {
+    let depth = NESTING_DEPTH.with(|d| {
+        let next = d.get() + 1;
+        d.set(next);
+        next
+    });
+    if depth > MAX_NESTING_DEPTH {
+        NESTING_DEPTH.with(|d| d.set(d.get() - 1));
+        // `Failure` rather than `Error`: this is not a "try the next
+        // alternative" condition, it is a hard stop. An `Error` would let
+        // `alt` backtrack and retry, re-descending the same input.
+        return Err(nom::Err::Failure(
+            <VerboseError<&str> as nom::error::ParseError<&str>>::from_error_kind(
+                input,
+                nom::error::ErrorKind::TooLarge,
+            ),
+        ));
+    }
+    let result = f(input);
+    NESTING_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    result
+}
+
+/// Reset the depth counter. Called at each top-level entry point so a
+/// parse that bailed mid-way cannot leave the thread-local dirty for the
+/// next parse on the same thread.
+fn reset_nesting_depth() {
+    NESTING_DEPTH.with(|d| d.set(0));
 }
 
 fn with_options<R>(opts: &ParserOptions, f: impl FnOnce() -> R) -> R {
@@ -125,6 +188,7 @@ pub fn parse_expr(source: &str) -> Result<Expr, ParseError> {
 /// Like [`parse_module`] but with a custom reader-macro configuration.
 pub fn parse_module_with(source: &str, opts: &ParserOptions) -> Result<Module, ParseError> {
     with_options(opts, || {
+        reset_nesting_depth();
         let (rest, _) = ws(source).map_err(|e| convert_err(source, e))?;
         let (rest, forms) =
             many0(form_with_trailing_ws)(rest).map_err(|e| convert_err(source, e))?;
@@ -141,6 +205,7 @@ pub fn parse_module_with(source: &str, opts: &ParserOptions) -> Result<Module, P
 /// Like [`parse_expr`] but with a custom reader-macro configuration.
 pub fn parse_expr_with(source: &str, opts: &ParserOptions) -> Result<Expr, ParseError> {
     with_options(opts, || {
+        reset_nesting_depth();
         let (rest, _) = ws(source).map_err(|e| convert_err(source, e))?;
         let (rest, e) = form(rest).map_err(|e| convert_err(source, e))?;
         let (rest, _) = ws(rest).map_err(|e| convert_err(source, e))?;
@@ -155,6 +220,21 @@ pub fn parse_expr_with(source: &str, opts: &ParserOptions) -> Result<Expr, Parse
 }
 
 fn convert_err(source: &str, e: nom::Err<VerboseError<&str>>) -> ParseError {
+    // A depth bail-out is reported as its own error rather than as a
+    // generic syntax error, so callers can tell "this input is hostile"
+    // from "this input has a typo".
+    if let nom::Err::Error(ve) | nom::Err::Failure(ve) = &e {
+        if ve.errors.iter().any(|(_, k)| {
+            matches!(
+                k,
+                nom::error::VerboseErrorKind::Nom(nom::error::ErrorKind::TooLarge)
+            )
+        }) {
+            return ParseError::TooDeep {
+                max: MAX_NESTING_DEPTH,
+            };
+        }
+    }
     let (input, msg) = match &e {
         nom::Err::Incomplete(_) => ("", "incomplete input".to_string()),
         nom::Err::Error(ve) | nom::Err::Failure(ve) => ve
@@ -227,19 +307,23 @@ fn form_with_trailing_ws(input: &str) -> PResult<Expr> {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn form(input: &str) -> PResult<Expr> {
-    alt((
-        quote_form,
-        quasiquote_form,
-        unquote_form,
-        dispatch_form,
-        list_form,
-        vector_form,
-        map_form,
-        string_form,
-        number_form,
-        keyword_form,
-        symbol_form,
-    ))(input)
+    // Every nested construct routes through here, so this is the one place
+    // the recursion depth needs guarding.
+    nested(input, |input| {
+        alt((
+            quote_form,
+            quasiquote_form,
+            unquote_form,
+            dispatch_form,
+            list_form,
+            vector_form,
+            map_form,
+            string_form,
+            number_form,
+            keyword_form,
+            symbol_form,
+        ))(input)
+    })
 }
 
 /// `'expr` is sugar for `(quote expr)`.
@@ -712,3 +796,63 @@ mod tests {
 }
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+
+#[cfg(test)]
+mod depth_probe {
+    /// The parser guard must hold on a *small* stack, not just the large
+    /// one the CLI reserves for evaluation: `parse_module` is public API
+    /// and an embedder may call it from any thread.
+    ///
+    /// 2 MiB is Rust's default stack for a spawned thread, so this is the
+    /// realistic worst case. If this test starts aborting the whole test
+    /// binary with "has overflowed its stack", `MAX_NESTING_DEPTH` has
+    /// been raised past what a small stack can take.
+    #[test]
+    fn max_nesting_depth_is_survivable_on_a_small_stack() {
+        let h = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                // Unterminated, so the parser descends the full depth
+                // before it can fail on anything else.
+                let src = "[".repeat(super::MAX_NESTING_DEPTH * 2) + "1";
+                match super::parse_module(&src) {
+                    Err(super::ParseError::TooDeep { max }) => {
+                        assert_eq!(max, super::MAX_NESTING_DEPTH);
+                    }
+                    other => panic!("expected TooDeep, got {other:?}"),
+                }
+            })
+            .unwrap();
+        h.join()
+            .expect("parser overflowed a 2 MiB stack at MAX_NESTING_DEPTH");
+    }
+
+    /// Nesting just under the ceiling must still parse. A guard that
+    /// rejects legitimate input is as broken as one that lets an attack
+    /// through.
+    #[test]
+    fn nesting_just_below_the_ceiling_still_parses() {
+        let depth = super::MAX_NESTING_DEPTH - 1;
+        let src = "[".repeat(depth) + "1" + &"]".repeat(depth);
+        assert!(super::parse_module(&src).is_ok());
+    }
+
+    /// Depth must not accumulate across sibling forms: a thousand
+    /// shallow forms in a row is not deep nesting.
+    #[test]
+    fn sibling_forms_do_not_accumulate_depth() {
+        let src = "[1] ".repeat(1000);
+        let m = super::parse_module(&src).expect("siblings should parse");
+        assert_eq!(m.forms.len(), 1000);
+    }
+
+    /// A failed parse must not leave the thread-local depth counter dirty
+    /// for the next parse on the same thread.
+    #[test]
+    fn depth_counter_resets_after_a_failed_parse() {
+        let too_deep = "[".repeat(super::MAX_NESTING_DEPTH * 2) + "1";
+        assert!(super::parse_module(&too_deep).is_err());
+        // Same thread, immediately after: an ordinary parse must work.
+        assert!(super::parse_module("[1 2 3]").is_ok());
+    }
+}

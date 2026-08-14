@@ -12,6 +12,7 @@ use trongoscript_parser::{parse_module, Expr, Module};
 use trongoscript_stdlib::{find_builtin_for, BuiltinError, BuiltinResult, Value};
 
 use crate::error::{EvalError, EvalResult};
+use crate::fuel::{Fuel, FuelLimits};
 use crate::modules::{is_known_module, ts_module_source};
 use crate::sandbox::{IncludeStack, Sandbox};
 use crate::value::{fn_handle, is_truthy, make_fn_value};
@@ -29,6 +30,10 @@ pub struct EvalConfig {
     /// runs fully reproducible by default. Hosts that want freshness per
     /// invocation (e.g. the CLI) should pass the current timestamp.
     pub rng_seed: Option<u64>,
+    /// Resource ceilings for the evaluation. Defaults are generous enough
+    /// that legitimate scripts never hit them; hosts evaluating untrusted
+    /// input should tighten them (see [`FuelLimits::strict`]).
+    pub fuel_limits: FuelLimits,
 }
 
 impl EvalConfig {
@@ -37,6 +42,7 @@ impl EvalConfig {
             sandbox: None,
             host_builtins: HashMap::new(),
             rng_seed: None,
+            fuel_limits: FuelLimits::default(),
         }
     }
 
@@ -52,6 +58,25 @@ impl EvalConfig {
 
     pub fn with_rng_seed(mut self, seed: u64) -> Self {
         self.rng_seed = Some(seed);
+        self
+    }
+
+    /// Set the resource ceilings for evaluations using this config.
+    ///
+    /// ```
+    /// use trongoscript::{EvalConfig, FuelLimits};
+    /// // Evaluating untrusted input in a request path.
+    /// let cfg = EvalConfig::default().with_fuel_limits(FuelLimits::strict());
+    /// ```
+    pub fn with_fuel_limits(mut self, limits: FuelLimits) -> Self {
+        self.fuel_limits = limits;
+        self
+    }
+
+    /// Set only the step budget, leaving the other ceilings at their
+    /// current values.
+    pub fn with_max_steps(mut self, max_steps: u64) -> Self {
+        self.fuel_limits.max_steps = max_steps;
         self
     }
 }
@@ -127,6 +152,9 @@ pub struct Context {
     /// pushes a [`Closure`] here and returns a handle [`Value`] (see
     /// [`crate::value::make_fn_value`]) that indexes into this vec.
     pub fns: Vec<Closure>,
+    /// Resource meter. Charged on every `eval` node visit and every closure
+    /// call; see [`crate::fuel`].
+    pub fuel: Fuel,
 }
 
 impl Context {
@@ -144,6 +172,7 @@ impl Context {
             loaded_ts_modules: HashSet::new(),
             rng_state: config.rng_seed.unwrap_or(0),
             fns: Vec::new(),
+            fuel: Fuel::new(config.fuel_limits),
         }
     }
 
@@ -236,7 +265,22 @@ pub fn eval_module(module: &Module, ctx: &mut Context) -> EvalResult<Value> {
 }
 
 /// Evaluate a single expression.
+///
+/// Every call charges one step against [`Context::fuel`] and occupies one
+/// level of the depth budget, so a non-terminating or unboundedly recursive
+/// script returns [`EvalError::FuelExhausted`] / [`EvalError::EvalDepthExceeded`]
+/// instead of spinning forever or overflowing the native stack.
 pub fn eval(expr: &Expr, ctx: &mut Context) -> EvalResult<Value> {
+    ctx.fuel.charge_step()?;
+    ctx.fuel.enter_eval()?;
+    let result = eval_inner(expr, ctx);
+    ctx.fuel.exit_eval();
+    result
+}
+
+/// The body of [`eval`], split out so the depth counter is released on both
+/// the success and error paths without a guard type borrowing `ctx`.
+fn eval_inner(expr: &Expr, ctx: &mut Context) -> EvalResult<Value> {
     match expr {
         Expr::Nil => Ok(Value::Null),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
@@ -255,6 +299,10 @@ pub fn eval(expr: &Expr, ctx: &mut Context) -> EvalResult<Value> {
             for it in items {
                 out.push(eval(it, ctx)?);
             }
+            // Elements were charged as they were produced; charge only this
+            // literal's own overhead so nesting is not billed repeatedly.
+            ctx.fuel
+                .charge_alloc(crate::fuel::container_overhead(out.len()))?;
             Ok(Value::Array(out))
         }
         Expr::Map(pairs) => {
@@ -264,6 +312,8 @@ pub fn eval(expr: &Expr, ctx: &mut Context) -> EvalResult<Value> {
                 let value = eval(v, ctx)?;
                 out.insert(key, value);
             }
+            ctx.fuel
+                .charge_alloc(crate::fuel::container_overhead(out.len()))?;
             Ok(Value::Object(out))
         }
         Expr::List(items) => eval_list(items, ctx),
@@ -390,7 +440,9 @@ fn dispatch_call(name: &str, arg_exprs: &[Expr], ctx: &mut Context) -> EvalResul
     // 1. Host builtin (gets a Context reference).
     if let Some(host) = ctx.host_builtins.get(name).cloned() {
         let args = eval_args(arg_exprs, ctx)?;
-        return host(ctx, &args).map_err(EvalError::from);
+        let out = host(ctx, &args).map_err(EvalError::from)?;
+        ctx.fuel.charge_value(&out)?;
+        return Ok(out);
     }
 
     // 1a. Context-bound `rng` module functions. Run *before* the
@@ -432,7 +484,30 @@ fn dispatch_call(name: &str, arg_exprs: &[Expr], ctx: &mut Context) -> EvalResul
                 actual: args.len(),
             });
         }
-        return (b.func)(&args).map_err(EvalError::from);
+        // Reject an oversized request *before* running the builtin, where
+        // its size is predictable from the arguments. `(range 100000000)`
+        // allocates gigabytes inside the call, so checking only the result
+        // would mean checking after the process has already been OOM-killed.
+        ctx.fuel.check_predicted_output(name, &args)?;
+        // Charge for work done *inside* the call, where it is proportional
+        // to argument size rather than argument count. The step counter
+        // bills one step per call and cannot see it otherwise.
+        ctx.fuel.charge_scan_cost(name, &args)?;
+        // Charge the result before handing it back. A builtin that returns
+        // a large collection is a single step but an enormous allocation;
+        // the step counter alone would never catch it.
+        //
+        // The output ceiling is published for the duration of the call:
+        // builtins that size their result from an argument have to reject
+        // it before allocating, and they cannot reach this meter from
+        // their `fn(&[Value])` signature.
+        let out =
+            trongoscript_stdlib::output_limit::with_limit(ctx.fuel.single_output_limit(), || {
+                (b.func)(&args)
+            })
+            .map_err(EvalError::from)?;
+        ctx.fuel.charge_value(&out)?;
+        return Ok(out);
     }
 
     // 2a. Evaluator-level higher-order functions (need Context to invoke
@@ -791,6 +866,16 @@ fn special_defn(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
 /// Returns [`EvalError::Arity`] if `args` does not match the closure's
 /// parameter list, or [`EvalError::InvalidForm`] if `handle` is out of range.
 pub fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
+    // Bound native stack growth: `eval` recurses on the Rust stack, so an
+    // unbounded self-call would overflow it (a SIGSEGV the host cannot
+    // catch) rather than returning an error.
+    ctx.fuel.enter_call()?;
+    let result = call_closure_inner(handle, args, ctx);
+    ctx.fuel.exit_call();
+    result
+}
+
+fn call_closure_inner(handle: usize, args: &[Value], ctx: &mut Context) -> EvalResult<Value> {
     let closure = ctx
         .fns
         .get(handle)
@@ -811,6 +896,16 @@ pub fn call_closure(handle: usize, args: &[Value], ctx: &mut Context) -> EvalRes
             expected: format!(">={}", fixed),
             actual: args.len(),
         });
+    }
+
+    // Binding arguments deep-clones each one, because `Value` is a tree.
+    // That cost is proportional to argument size but invisible to the step
+    // counter, which sees one call regardless. A script that passes its
+    // own growing accumulator back in each iteration —
+    // `(reduce (fn [acc x] [acc]) ...)` — is quadratic in wall-clock while
+    // spending a linear number of steps, so charge the copy explicitly.
+    for a in args.iter() {
+        ctx.fuel.charge_steps(crate::fuel::copy_step_cost(a))?;
     }
 
     // Swap the caller's lexical frames out for the closure's captured
@@ -1463,7 +1558,11 @@ fn io_read_file(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let path = one_string_arg("read-file", args, ctx)?;
     let sb = require_sandbox(ctx)?.clone();
     let text = sb.read_text(ctx.current_file_dir.as_deref(), &path)?;
-    Ok(Value::String(text))
+    // The sandbox caps any single file, but not the total across many
+    // reads; charge each one so a loop of reads is bounded too.
+    let out = Value::String(text);
+    ctx.fuel.charge_value(&out)?;
+    Ok(out)
 }
 
 fn io_list_files(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
@@ -1479,7 +1578,9 @@ fn io_list_files(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
             Value::Object(m)
         })
         .collect();
-    Ok(Value::Array(arr))
+    let out = Value::Array(arr);
+    ctx.fuel.charge_value(&out)?;
+    Ok(out)
 }
 
 /// `(glob "pattern")` — list paths matching a glob, anchored at the
@@ -1489,7 +1590,9 @@ fn io_glob(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let sb = require_sandbox(ctx)?.clone();
     let matches = sb.glob(ctx.current_file_dir.as_deref(), &pattern)?;
     let arr = matches.into_iter().map(|m| Value::String(m.path)).collect();
-    Ok(Value::Array(arr))
+    let out = Value::Array(arr);
+    ctx.fuel.charge_value(&out)?;
+    Ok(out)
 }
 
 // Re-export for tests so the host can construct a BuiltinError if needed.

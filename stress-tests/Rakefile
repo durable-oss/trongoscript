@@ -1,0 +1,41 @@
+# Stress tests for Trongoscript's evaluation resource metering.
+#
+#   rake            # build the CLI, then run every stress test
+#   rake test       # run the tests against whatever binary is already built
+#   rake build      # build the release CLI only
+#
+# The tests drive the `trongo` binary as a subprocess. That is deliberate:
+# a missing resource guard shows up as a stack overflow or an OOM kill,
+# which takes the process down. In-process tests cannot observe their own
+# SIGSEGV; a subprocess harness can, and reports it as a failure.
+
+require "rake/testtask"
+
+REPO_ROOT = File.expand_path("..", __dir__)
+
+desc "Build the release CLI the stress tests drive"
+task :build do
+  Dir.chdir(REPO_ROOT) do
+    sh "cargo build --release --bin trongo"
+  end
+end
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "lib"
+  t.test_files = FileList["test/**/test_*.rb"]
+  t.warning = false
+  # Stress cases are slow by nature; show progress as they go.
+  t.verbose = true
+end
+
+desc "Build, then run the full stress suite"
+task default: %i[build test]
+
+desc "Run only the tests that must never crash the process"
+task :crash do
+  Dir.chdir(__dir__) do
+    sh "ruby -Ilib test/test_stack_safety.rb"
+  end
+end
+
+# Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

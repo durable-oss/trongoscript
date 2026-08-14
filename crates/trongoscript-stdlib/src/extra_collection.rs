@@ -48,14 +48,23 @@ fn sort(args: &[Value]) -> BuiltinResult {
     Ok(Value::Array(out))
 }
 
+/// Remove duplicates, preserving first-seen order.
+///
+/// The obvious implementation compares each element against everything
+/// kept so far, which is O(n^2) on distinct input — and since the whole
+/// pass is a single builtin call, it costs one evaluation step, so no
+/// step budget can bound it. 80k distinct elements took six seconds and
+/// reported five steps.
+///
+/// Every element therefore goes through [`crate::value_key`], including
+/// composites. An earlier version hashed only scalars, on the grounds
+/// that keying a list means walking it — but so does a single deep
+/// comparison against one, and the scan does that once per element
+/// already kept. Wrapping each element in a one-element list was enough
+/// to restore the original quadratic behaviour.
 fn uniq(args: &[Value]) -> BuiltinResult {
     let a = expect_array("uniq", &args[0])?;
-    let mut out: Vec<Value> = Vec::with_capacity(a.len());
-    for v in a {
-        if !out.iter().any(|w| w == v) {
-            out.push(v.clone());
-        }
-    }
+    let (out, _) = crate::value_key::dedup_values(a);
     Ok(Value::Array(out))
 }
 
@@ -244,5 +253,77 @@ inventory::submit! { Builtin::in_module(MODULE, "drop",        2, 2, drop_n) }
 inventory::submit! { Builtin::in_module(MODULE, "frequencies", 1, 1, frequencies) }
 inventory::submit! { Builtin::in_module(MODULE, "pluck",       2, 2, pluck) }
 inventory::submit! { Builtin::in_module(MODULE, "group-by",    2, 2, group_by) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn uniq_of(v: Value) -> Value {
+        uniq(&[v]).unwrap()
+    }
+
+    #[test]
+    fn uniq_dedupes_scalars_preserving_first_seen_order() {
+        assert_eq!(
+            uniq_of(json!([3, 1, 3, 2, 1, "a", "a", true, true, null, null])),
+            json!([3, 1, 2, "a", true, null])
+        );
+    }
+
+    #[test]
+    fn uniq_keeps_types_distinct() {
+        // The hash key carries a type tag, so these must not collapse
+        // into each other the way a bare string key would.
+        assert_eq!(uniq_of(json!([1, "1", true])), json!([1, "1", true]));
+    }
+
+    #[test]
+    fn uniq_keys_numbers_by_their_serialized_form() {
+        // `serde_json` keeps integer and float reprs distinct even when
+        // the values compare equal, so `1` and `1.0` are separate keys
+        // here. That matches the previous `==` comparison, which used
+        // the same `PartialEq`. In practice the parser produces one repr
+        // or the other, so a script sees `(uniq [1 1.0])` → `[1]`.
+        assert_eq!(uniq_of(json!([1, 1.0])), json!([1, 1.0]));
+        assert_eq!(uniq_of(json!([1, 1])), json!([1]));
+        assert_eq!(uniq_of(json!([1.5, 1.5])), json!([1.5]));
+    }
+
+    #[test]
+    fn uniq_still_dedupes_composites() {
+        // Arrays and objects have no cheap hash key, so they keep the
+        // linear scan. They must still dedupe.
+        assert_eq!(
+            uniq_of(json!([[1, 2], [1, 2], [3], {"a": 1}, {"a": 1}, [3]])),
+            json!([[1, 2], [3], {"a": 1}])
+        );
+    }
+
+    #[test]
+    fn uniq_preserves_order_across_mixed_kinds() {
+        // Scalars go through the set and composites through the scan, so
+        // interleaving them is where an ordering bug would show up.
+        assert_eq!(
+            uniq_of(json!([1, [1], 1, "1", [1], true])),
+            json!([1, [1], "1", true])
+        );
+    }
+
+    #[test]
+    fn uniq_is_linear_on_distinct_scalars() {
+        // The scan this replaced took six seconds on 80k distinct
+        // elements and reported five evaluation steps, so no step budget
+        // could bound it. 200k is instant now and would not finish then.
+        let input: Vec<Value> = (0..200_000).map(|i| json!(i)).collect();
+        let out = uniq_of(Value::Array(input));
+        assert_eq!(out.as_array().unwrap().len(), 200_000);
+    }
+
+    #[test]
+    fn uniq_of_empty_is_empty() {
+        assert_eq!(uniq_of(json!([])), json!([]));
+    }
+}
 
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

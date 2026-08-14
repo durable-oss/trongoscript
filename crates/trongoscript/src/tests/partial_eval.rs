@@ -634,7 +634,10 @@ fn first_class_fn_head_reduces() {
 fn thread_first_fully_reduces_when_pure() {
     let mut ctx = pe_ctx();
     // No opaque forms: (-> 5 (+ 3) (* 2)) folds to 16.
-    assert_eq!(done_num(pe("(-> 5 (+ 3) (* 2))", &mut ctx, &opaque(&[]))), 16.0);
+    assert_eq!(
+        done_num(pe("(-> 5 (+ 3) (* 2))", &mut ctx, &opaque(&[]))),
+        16.0
+    );
 }
 
 #[test]
