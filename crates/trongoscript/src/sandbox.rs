@@ -45,11 +45,25 @@
 //!
 //! Even when a sandbox is provided, **listing or reading is the *only*
 //! filesystem access available** — no writing, no executing, no network.
+//!
+//! # Backends
+//!
+//! What "the filesystem" means is a [`FileStore`](crate::vfs::FileStore).
+//! [`Sandbox::new`] uses [`RealFs`](crate::vfs::RealFs) and behaves exactly as
+//! it always has; [`Sandbox::with_store`] takes any other backend, which is
+//! how a host with no filesystem — a browser — runs documents that `include`
+//! each other. The containment rules above are unchanged either way: only
+//! symlink resolution differs, and a backend without symlinks has no symlink
+//! escape to resolve.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use thiserror::Error;
+
+use crate::vfs::{normalize, FileStore, RealFs};
+
+pub use crate::vfs::DirEntry;
 
 /// Errors raised by sandbox operations.
 #[derive(Error, Debug)]
@@ -136,8 +150,9 @@ impl Mount {
 
 /// A configured filesystem sandbox.
 ///
-/// Cloning is cheap: the mount table sits behind an [`Arc`], because the
-/// evaluator clones the sandbox on every sandboxed I/O builtin call.
+/// Cloning is cheap: the mount table and the backing store both sit behind
+/// an [`Arc`], because the evaluator clones the sandbox on every sandboxed
+/// I/O builtin call.
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     /// Mount table, kept sorted by descending virtual-path length so a
@@ -145,11 +160,14 @@ pub struct Sandbox {
     /// at least the root mount at index `len - 1`.
     mounts: Arc<Vec<Mount>>,
     limits: SandboxLimits,
+    /// Where reads actually go. [`RealFs`] unless the host said otherwise.
+    store: Arc<dyn FileStore>,
 }
 
 impl Sandbox {
-    /// Create a sandbox rooted at `root`. The path is canonicalized; if it
-    /// does not exist or is not a directory the function returns an error.
+    /// Create a sandbox rooted at `root` on the real filesystem. The path is
+    /// canonicalized; if it does not exist or is not a directory the function
+    /// returns an error.
     ///
     /// The root is mounted at the virtual path `/`. Additional host
     /// directories can be attached with [`Self::mount`].
@@ -161,6 +179,53 @@ impl Sandbox {
                 host_path: root,
             }]),
             limits: SandboxLimits::default(),
+            store: Arc::new(RealFs),
+        })
+    }
+
+    /// Create a sandbox rooted at `root` inside `store`.
+    ///
+    /// The root is canonicalized *through the store*, then validated by
+    /// asking the store whether it is a directory. For [`RealFs`] that is
+    /// what [`Self::new`] always did; for a store with no symlinks it is the
+    /// lexical normalization, which is that store's canonical form. Either
+    /// way [`Self::root`] comes back in whatever spelling the backend
+    /// considers canonical, which is the spelling `resolve` compares
+    /// containment against.
+    ///
+    /// # Errors
+    ///
+    /// [`SandboxError::NotADirectory`] if the store does not report `root` as
+    /// a directory, or [`SandboxError::Io`] if it cannot say.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use trongoscript::vfs::{MemoryFs, MEMORY_FS_ROOT};
+    /// use trongoscript::Sandbox;
+    ///
+    /// let mut fs = MemoryFs::new();
+    /// fs.insert(format!("{MEMORY_FS_ROOT}/hello.txt"), "hi there");
+    ///
+    /// let sb = Sandbox::with_store(MEMORY_FS_ROOT, Arc::new(fs)).unwrap();
+    /// assert_eq!(sb.read_text(None, "hello.txt").unwrap(), "hi there");
+    /// ```
+    pub fn with_store<P: AsRef<Path>>(
+        root: P,
+        store: Arc<dyn FileStore>,
+    ) -> Result<Self, SandboxError> {
+        let root = store
+            .canonicalize_existing_prefix(&normalize(root.as_ref()))
+            .map_err(|e| SandboxError::Io(e.to_string()))?;
+        store_dir(store.as_ref(), &root)?;
+        Ok(Self {
+            mounts: Arc::new(vec![Mount {
+                virtual_path: String::new(),
+                host_path: root,
+            }]),
+            limits: SandboxLimits::default(),
+            store,
         })
     }
 
@@ -179,6 +244,10 @@ impl Sandbox {
     ///
     /// Fails if the mount point is not an absolute virtual path, if it is
     /// already mounted, or if `host_path` is not an existing directory.
+    ///
+    /// `host_path` is interpreted in whichever backend the sandbox was built
+    /// with — a real directory for [`Self::new`], a path inside the store for
+    /// [`Self::with_store`].
     pub fn mount<P: AsRef<Path>>(
         mut self,
         virtual_path: &str,
@@ -186,7 +255,7 @@ impl Sandbox {
     ) -> Result<Self, SandboxError> {
         let vpath = normalize_virtual(virtual_path)
             .ok_or_else(|| SandboxError::BadMountPoint(virtual_path.to_string()))?;
-        let host = canonical_dir(host_path.as_ref())?;
+        let host = self.canonical_mount_dir(host_path.as_ref())?;
 
         let mounts = Arc::make_mut(&mut self.mounts);
         if let Some(existing) = mounts.iter_mut().find(|m| m.virtual_path == vpath) {
@@ -205,6 +274,21 @@ impl Sandbox {
         // Longest virtual path first, so `find` is a longest-prefix match.
         mounts.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
         Ok(self)
+    }
+
+    /// Resolve a mount's backing directory through this sandbox's store.
+    ///
+    /// For [`RealFs`] this is `canonicalize` plus an `is_dir` check, i.e.
+    /// exactly what mounting always did. For a store without symlinks the
+    /// canonicalization is the lexical normalization the path already needs,
+    /// so the same two lines serve both.
+    fn canonical_mount_dir(&self, p: &Path) -> Result<PathBuf, SandboxError> {
+        let canonical = self
+            .store
+            .canonicalize_existing_prefix(p)
+            .map_err(|e| SandboxError::Io(e.to_string()))?;
+        store_dir(self.store.as_ref(), &canonical)?;
+        Ok(canonical)
     }
 
     /// The host directory backing the virtual root.
@@ -279,8 +363,13 @@ impl Sandbox {
         // a `NotFound` from canonicalize() before checking containment.
         let normalized = normalize(&candidate);
 
-        // Canonicalize the longest existing prefix to handle symlinks.
-        let resolved = canonicalize_existing_prefix(&normalized)
+        // Canonicalize the longest existing prefix to handle symlinks. A
+        // store without symlinks answers with the normalized path unchanged,
+        // which leaves the containment check below doing exactly the same
+        // work.
+        let resolved = self
+            .store
+            .canonicalize_existing_prefix(&normalized)
             .map_err(|e| SandboxError::Io(e.to_string()))?;
 
         // Containment is checked against the owning mount, not the root, so
@@ -315,21 +404,23 @@ impl Sandbox {
     /// Read a file as a UTF-8 string, enforcing the size limit.
     pub fn read_text(&self, base: Option<&Path>, requested: &str) -> Result<String, SandboxError> {
         let path = self.resolve(base, requested)?;
-        let meta = std::fs::metadata(&path).map_err(|e| match e.kind() {
+        let meta = self.store.metadata(&path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => SandboxError::NotFound(path.display().to_string()),
             _ => SandboxError::Io(e.to_string()),
         })?;
-        if !meta.is_file() {
+        if !meta.is_file {
             return Err(SandboxError::NotAFile(path.display().to_string()));
         }
-        if meta.len() > self.limits.max_file_bytes {
+        if meta.len > self.limits.max_file_bytes {
             return Err(SandboxError::FileTooLarge {
                 path: path.display().to_string(),
-                size: meta.len(),
+                size: meta.len,
                 limit: self.limits.max_file_bytes,
             });
         }
-        std::fs::read_to_string(&path).map_err(|e| SandboxError::Io(e.to_string()))
+        self.store
+            .read_to_string(&path)
+            .map_err(|e| SandboxError::Io(e.to_string()))
     }
 
     /// List the names of regular files / directories in `requested` (a
@@ -340,41 +431,24 @@ impl Sandbox {
         requested: &str,
     ) -> Result<Vec<DirEntry>, SandboxError> {
         let path = self.resolve(base, requested)?;
-        let meta = std::fs::metadata(&path).map_err(|e| match e.kind() {
+        let meta = self.store.metadata(&path).map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => SandboxError::NotFound(path.display().to_string()),
             _ => SandboxError::Io(e.to_string()),
         })?;
-        if !meta.is_dir() {
+        if !meta.is_dir {
             return Err(SandboxError::NotADirectory(path.display().to_string()));
         }
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(&path).map_err(|e| SandboxError::Io(e.to_string()))? {
-            if out.len() >= self.limits.max_list_entries {
-                break;
-            }
-            let entry = entry.map_err(|e| SandboxError::Io(e.to_string()))?;
-            let ft = entry
-                .file_type()
-                .map_err(|e| SandboxError::Io(e.to_string()))?;
-            // Skip symlinks defensively — following them could escape the
-            // root via a TOCTOU race.
-            if ft.is_symlink() {
-                continue;
-            }
-            out.push(DirEntry {
-                name: entry.file_name().to_string_lossy().to_string(),
-                is_dir: ft.is_dir(),
-            });
-        }
+        // Symlinks are already gone: filtering them is the store's job, so
+        // that "no symlink ever comes back" is one backend invariant rather
+        // than a check repeated at every walk site here.
+        let mut out = self
+            .store
+            .read_dir(&path)
+            .map_err(|e| SandboxError::Io(e.to_string()))?;
+        out.truncate(self.limits.max_list_entries);
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DirEntry {
-    pub name: String,
-    pub is_dir: bool,
 }
 
 /// One result returned by [`Sandbox::glob`].
@@ -430,11 +504,11 @@ impl Sandbox {
 
         // start_dir must exist and be a directory for the walk to mean
         // anything; missing → no matches (consistent with shell globs).
-        let meta = match std::fs::metadata(&start_dir) {
+        let meta = match self.store.metadata(&start_dir) {
             Ok(m) => m,
             Err(_) => return Ok(Vec::new()),
         };
-        if !meta.is_dir() {
+        if !meta.is_dir {
             return Ok(Vec::new());
         }
 
@@ -466,6 +540,7 @@ impl Sandbox {
 
         let mut out: Vec<GlobMatch> = Vec::new();
         walk_glob(
+            self.store.as_ref(),
             &start_dir,
             &rel_prefix,
             &segments,
@@ -530,6 +605,7 @@ fn join_rel(prefix: &str, name: &str) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn walk_glob(
+    store: &dyn FileStore,
     dir: &Path,
     rel: &str,
     segments: &[&str],
@@ -561,6 +637,7 @@ fn walk_glob(
         // (a) Treat `**` as matching zero segments — try the next segment
         //     against this same directory.
         walk_glob(
+            store,
             dir,
             rel,
             segments,
@@ -571,33 +648,24 @@ fn walk_glob(
             max_depth,
         )?;
         // (b) And/or descend one level, keeping `**` active.
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return Ok(()),
+        let Ok(entries) = store.read_dir(dir) else {
+            return Ok(());
         };
         for entry in entries {
             if out.len() >= max_entries {
                 break;
             }
-            let entry = entry.map_err(|e| SandboxError::Io(e.to_string()))?;
-            let ft = entry
-                .file_type()
-                .map_err(|e| SandboxError::Io(e.to_string()))?;
-            if ft.is_symlink() {
+            if !entry.is_dir {
                 continue;
             }
-            if !ft.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
             // Same dotfile rule: `**` doesn't descend into hidden dirs.
-            if name.starts_with('.') {
+            if entry.name.starts_with('.') {
                 continue;
             }
-            let child_rel = join_rel(rel, &name);
-            let child_path = entry.path();
+            let child_rel = join_rel(rel, &entry.name);
             walk_glob(
-                &child_path,
+                store,
+                &dir.join(&entry.name),
                 &child_rel,
                 segments,
                 seg_idx,
@@ -610,9 +678,8 @@ fn walk_glob(
         return Ok(());
     }
 
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
+    let Ok(entries) = store.read_dir(dir) else {
+        return Ok(());
     };
 
     let is_last = seg_idx + 1 == segments.len();
@@ -621,27 +688,19 @@ fn walk_glob(
         if out.len() >= max_entries {
             break;
         }
-        let entry = entry.map_err(|e| SandboxError::Io(e.to_string()))?;
-        let ft = entry
-            .file_type()
-            .map_err(|e| SandboxError::Io(e.to_string()))?;
-        if ft.is_symlink() {
+        if !match_segment(seg, &entry.name) {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !match_segment(seg, &name) {
-            continue;
-        }
-        let child_rel = join_rel(rel, &name);
+        let child_rel = join_rel(rel, &entry.name);
         if is_last {
             out.push(GlobMatch {
                 path: child_rel,
-                is_dir: ft.is_dir(),
+                is_dir: entry.is_dir,
             });
-        } else if ft.is_dir() {
-            let child_path = entry.path();
+        } else if entry.is_dir {
             walk_glob(
-                &child_path,
+                store,
+                &dir.join(&entry.name),
                 &child_rel,
                 segments,
                 seg_idx + 1,
@@ -756,6 +815,22 @@ fn match_class(pat: &[u8], start: usize, c: u8) -> Option<(bool, usize)> {
     Some((found ^ negated, i + 1))
 }
 
+/// Assert that `p` is a directory according to `store`.
+///
+/// A path the store cannot find comes back as [`SandboxError::Io`] rather
+/// than [`SandboxError::NotADirectory`], matching what `canonicalize` used to
+/// report for a nonexistent mount target: "there is nothing here" and "there
+/// is something here and it isn't a directory" are different mistakes.
+fn store_dir(store: &dyn FileStore, p: &Path) -> Result<(), SandboxError> {
+    let meta = store
+        .metadata(p)
+        .map_err(|e| SandboxError::Io(e.to_string()))?;
+    if !meta.is_dir {
+        return Err(SandboxError::NotADirectory(p.display().to_string()));
+    }
+    Ok(())
+}
+
 /// Canonicalize a host path and assert it is a directory.
 fn canonical_dir(p: &Path) -> Result<PathBuf, SandboxError> {
     let canonical = p
@@ -817,64 +892,6 @@ fn virtual_strip_prefix<'a>(vpath: &'a str, prefix: &str) -> Option<&'a str> {
         None => Some(""),               // exact match: the mount point itself
         Some(b'/') => Some(&rest[1..]), // a path inside the mount
         _ => None,                      // partial segment match, e.g. /tomcat vs /tom
-    }
-}
-
-/// Lexically normalize a path: collapse `.` and `..` without consulting the
-/// filesystem. Leaves the original path intact if it contains no special
-/// components.
-fn normalize(p: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-/// Canonicalize the longest existing prefix of `p` and append any
-/// nonexistent tail. This lets us validate sandbox containment for paths
-/// that don't (yet) exist while still honoring symlinks for the parts that
-/// do.
-fn canonicalize_existing_prefix(p: &Path) -> std::io::Result<PathBuf> {
-    let mut current = p.to_path_buf();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        match current.canonicalize() {
-            Ok(c) => {
-                let mut out = c;
-                for piece in tail.iter().rev() {
-                    out.push(piece);
-                }
-                return Ok(out);
-            }
-            Err(_) => {
-                let Some(parent) = current.parent().map(Path::to_path_buf) else {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "no existing ancestor",
-                    ));
-                };
-                let file_name = current
-                    .file_name()
-                    .map(|s| s.to_os_string())
-                    .unwrap_or_else(|| std::ffi::OsString::from(""));
-                tail.push(file_name);
-                if parent.as_os_str().is_empty() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "no existing ancestor",
-                    ));
-                }
-                current = parent;
-            }
-        }
     }
 }
 
@@ -1339,6 +1356,120 @@ mod tests {
         let (_dir, sb) = bob_and_tom();
         let err = sb.resolve(None, "/tom/\0y").unwrap_err();
         assert!(matches!(err, SandboxError::Escape(_)), "got {:?}", err);
+    }
+
+    // -----------------------------------------------------------------
+    // Store-backed sandboxes. Nothing below this line touches the disk.
+    // -----------------------------------------------------------------
+
+    use crate::vfs::{MemoryFs, MEMORY_FS_ROOT};
+
+    fn memory_sandbox(files: &[(&str, &str)]) -> Sandbox {
+        let mut fs = MemoryFs::new();
+        for (path, contents) in files {
+            fs.insert(format!("{MEMORY_FS_ROOT}/{path}"), *contents);
+        }
+        Sandbox::with_store(MEMORY_FS_ROOT, Arc::new(fs)).unwrap()
+    }
+
+    #[test]
+    fn reads_a_file_out_of_a_store() {
+        let sb = memory_sandbox(&[("hello.txt", "hi there")]);
+        assert_eq!(sb.read_text(None, "hello.txt").unwrap(), "hi there");
+        assert_eq!(sb.read_text(None, "/hello.txt").unwrap(), "hi there");
+    }
+
+    #[test]
+    fn store_backed_root_still_refuses_dotdot() {
+        // The lexical containment check is the whole security story for a
+        // store with no symlinks, so it had better still fire.
+        let sb = memory_sandbox(&[("hello.txt", "hi")]);
+        let err = sb.resolve(None, "../etc/passwd").unwrap_err();
+        assert!(matches!(err, SandboxError::Escape(_)), "got {:?}", err);
+
+        let err = sb.resolve(None, "/../etc/passwd").unwrap_err();
+        assert!(matches!(err, SandboxError::Escape(_)), "got {:?}", err);
+    }
+
+    #[test]
+    fn store_backed_absolute_path_is_virtual() {
+        let sb = memory_sandbox(&[("etc/passwd", "sandboxed")]);
+        assert_eq!(sb.read_text(None, "/etc/passwd").unwrap(), "sandboxed");
+    }
+
+    #[test]
+    fn lists_and_globs_a_store() {
+        let sb = memory_sandbox(&[
+            ("a.yaml", ""),
+            ("b.yaml", ""),
+            ("c.txt", ""),
+            ("sub/deep.yaml", ""),
+        ]);
+
+        let names: Vec<String> = sb
+            .list(None, ".")
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, ["a.yaml", "b.yaml", "c.txt", "sub"]);
+
+        let paths: Vec<String> = sb
+            .glob(None, "*.yaml")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.path)
+            .collect();
+        assert_eq!(paths, ["a.yaml", "b.yaml"]);
+
+        let paths: Vec<String> = sb
+            .glob(None, "**/*.yaml")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.path)
+            .collect();
+        assert_eq!(paths, ["a.yaml", "b.yaml", "sub/deep.yaml"]);
+    }
+
+    #[test]
+    fn mounts_a_second_subtree_of_a_store() {
+        let mut fs = MemoryFs::new();
+        fs.insert("/bundle/x", "bundle-x");
+        fs.insert("/vendor/y", "vendor-y");
+        let sb = Sandbox::with_store("/bundle", Arc::new(fs))
+            .unwrap()
+            .mount("/vendor", "/vendor")
+            .unwrap();
+
+        assert_eq!(sb.read_text(None, "/x").unwrap(), "bundle-x");
+        assert_eq!(sb.read_text(None, "/vendor/y").unwrap(), "vendor-y");
+
+        // And `..` still can't climb out of the mount into the root.
+        let vendor = sb.resolve(None, "/vendor").unwrap();
+        let err = sb.resolve(Some(&vendor), "../bundle/x").unwrap_err();
+        assert!(matches!(err, SandboxError::Escape(_)), "got {:?}", err);
+    }
+
+    #[test]
+    fn store_backed_size_limit_is_enforced() {
+        let mut fs = MemoryFs::new();
+        fs.insert("/bundle/big.txt", "x".repeat(100));
+        let sb = Sandbox::with_store("/bundle", Arc::new(fs))
+            .unwrap()
+            .with_limits(SandboxLimits {
+                max_file_bytes: 10,
+                ..SandboxLimits::default()
+            });
+        let err = sb.read_text(None, "big.txt").unwrap_err();
+        assert!(matches!(err, SandboxError::FileTooLarge { .. }));
+    }
+
+    #[test]
+    fn an_empty_store_cannot_be_a_root() {
+        // No keys means no implied `/bundle` directory. A bundle with no
+        // files is an error, so failing here is the right answer.
+        let err = Sandbox::with_store(MEMORY_FS_ROOT, Arc::new(MemoryFs::new())).unwrap_err();
+        assert!(matches!(err, SandboxError::Io(_)), "got {:?}", err);
     }
 
     #[test]

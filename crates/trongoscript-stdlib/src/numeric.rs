@@ -178,6 +178,35 @@ fn ge(args: &[Value]) -> BuiltinResult {
     ))
 }
 
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::variadic("+", add),
+    Builtin::variadic("-", sub),
+    Builtin::variadic("*", mul),
+    Builtin::variadic("/", div),
+    Builtin::new("mod", 2, 2, rem),
+    Builtin::new("abs", 1, 1, abs),
+    Builtin::new("floor", 1, 1, floor),
+    Builtin::new("ceil", 1, 1, ceil),
+    Builtin::new("round", 1, 2, round),
+    Builtin::variadic("min", min),
+    Builtin::variadic("max", max),
+    Builtin::new("<", 2, 2, lt),
+    Builtin::new(">", 2, 2, gt),
+    Builtin::new("<=", 2, 2, le),
+    Builtin::new(">=", 2, 2, ge),
+];
+
 inventory::submit! { Builtin::variadic("+",   add) }
 inventory::submit! { Builtin::variadic("-",   sub) }
 inventory::submit! { Builtin::variadic("*",   mul) }

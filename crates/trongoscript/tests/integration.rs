@@ -1128,6 +1128,88 @@ fn set_operations() {
 }
 
 // ---------------------------------------------------------------------------
+// Store-backed evaluation: the same `include` machinery with no disk at all.
+// ---------------------------------------------------------------------------
+
+/// Build a context whose sandbox reads out of a `MemoryFs`, with
+/// `current_file_dir` set to the root the way a host loading an entry file
+/// would set it.
+fn memory_ctx(files: &[(&str, &str)]) -> Context {
+    use std::sync::Arc;
+    use trongoscript::vfs::{MemoryFs, MEMORY_FS_ROOT};
+
+    let mut fs = MemoryFs::new();
+    for (path, contents) in files {
+        fs.insert(format!("{MEMORY_FS_ROOT}/{path}"), *contents);
+    }
+    let sb = Sandbox::with_store(MEMORY_FS_ROOT, Arc::new(fs)).expect("store sandbox");
+    let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+    ctx.current_file_dir = Some(PathBuf::from(MEMORY_FS_ROOT));
+    ctx
+}
+
+#[test]
+fn include_chain_runs_entirely_in_memory() {
+    let mut ctx = memory_ctx(&[
+        ("palette.trongo", r#"(def accent "teal")"#),
+        (
+            "sub/depth.trongo",
+            r#"(do (include "../palette.trongo") (def depth 3))"#,
+        ),
+    ]);
+
+    let v = eval_source(
+        r#"(do (include "sub/depth.trongo") {:accent accent :depth depth})"#,
+        &mut ctx,
+    )
+    .expect("eval");
+    assert_eq!(v["accent"], Value::String("teal".into()));
+    assert_eq!(v["depth"], Value::Number(3.into()));
+}
+
+#[test]
+fn include_cycle_is_caught_across_two_spellings_of_one_path() {
+    // The cycle detector keys on the resolved path. Under a store those are
+    // lexically normalized rather than canonicalized, so `render/../a` and
+    // `a` have to collapse to the same key or this cycle slips through and
+    // recurses until the depth limit — a much worse error message.
+    let mut ctx = memory_ctx(&[
+        ("a.trongo", r#"(include "sub/../a.trongo")"#),
+        ("sub/keep.trongo", ""),
+    ]);
+
+    let err = eval_source(r#"(include "a.trongo")"#, &mut ctx).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("cycle"), "expected a cycle error, got {text}");
+}
+
+#[test]
+fn store_backed_include_cannot_escape_the_root() {
+    let mut ctx = memory_ctx(&[("main.trongo", "1")]);
+    let r = eval_source(r#"(include "../outside.trongo")"#, &mut ctx);
+    assert!(r.is_err(), "expected sandbox rejection, got {r:?}");
+}
+
+#[test]
+fn store_backed_read_file_and_list_files() {
+    let mut ctx = memory_ctx(&[("notes.txt", "hello"), ("sub/a.txt", "")]);
+
+    assert_eq!(
+        eval_source(r#"(read-file "notes.txt")"#, &mut ctx).unwrap(),
+        Value::String("hello".into())
+    );
+
+    let listed = eval_source(r#"(list-files ".")"#, &mut ctx).unwrap();
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["notes.txt", "sub"]);
+}
+
+// ---------------------------------------------------------------------------
 // Emitting Trongoscript source (to_trongo_source) — the inverse of reading.
 // ---------------------------------------------------------------------------
 

@@ -250,6 +250,41 @@ fn parse_float(args: &[Value]) -> BuiltinResult {
         })
 }
 
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::in_module(MODULE, "sqrt", 1, 1, sqrt),
+    Builtin::in_module(MODULE, "cbrt", 1, 1, cbrt),
+    Builtin::in_module(MODULE, "pow", 2, 2, pow),
+    Builtin::in_module(MODULE, "log", 1, 1, ln),
+    Builtin::in_module(MODULE, "log10", 1, 1, log10),
+    Builtin::in_module(MODULE, "log2", 1, 1, log2),
+    Builtin::in_module(MODULE, "exp", 1, 1, exp),
+    Builtin::in_module(MODULE, "sin", 1, 1, sin),
+    Builtin::in_module(MODULE, "cos", 1, 1, cos),
+    Builtin::in_module(MODULE, "tan", 1, 1, tan),
+    Builtin::in_module(MODULE, "asin", 1, 1, asin),
+    Builtin::in_module(MODULE, "acos", 1, 1, acos),
+    Builtin::in_module(MODULE, "atan", 1, 1, atan),
+    Builtin::in_module(MODULE, "atan2", 2, 2, atan2),
+    Builtin::in_module(MODULE, "sign", 1, 1, sign),
+    Builtin::in_module_variadic(MODULE, "gcd", gcd),
+    Builtin::in_module_variadic(MODULE, "lcm", lcm),
+    Builtin::in_module(MODULE, "pi", 0, 0, pi),
+    Builtin::in_module(MODULE, "e", 0, 0, e_const),
+    Builtin::in_module(MODULE, "parse-int", 1, 1, parse_int),
+    Builtin::in_module(MODULE, "parse-float", 1, 1, parse_float),
+];
+
 inventory::submit! { Builtin::in_module(MODULE, "sqrt",        1, 1, sqrt) }
 inventory::submit! { Builtin::in_module(MODULE, "cbrt",        1, 1, cbrt) }
 inventory::submit! { Builtin::in_module(MODULE, "pow",         2, 2, pow) }

@@ -469,6 +469,39 @@ fn skip_block(s: &str, tag: &str) -> Option<usize> {
     s_lower.find(close.as_str()).map(|p| p + close_bytes.len())
 }
 
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes
+/// the module work on `wasm32-unknown-unknown`: inventory registers
+/// through a link section, and nothing in a wasm build references these
+/// functions by name, so the linker drops them before the constructors
+/// that would have registered them ever run. Naming them in an ordinary
+/// `static` keeps them alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins
+/// that way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::in_module(MODULE, "lstrip", 1, 1, lstrip),
+    Builtin::in_module(MODULE, "rstrip", 1, 1, rstrip),
+    Builtin::in_module(MODULE, "truncate", 2, 2, truncate),
+    Builtin::in_module(MODULE, "pad-left", 2, 3, pad_left),
+    Builtin::in_module(MODULE, "pad-right", 2, 3, pad_right),
+    Builtin::in_module(MODULE, "repeat", 2, 2, repeat),
+    Builtin::in_module(MODULE, "chars", 1, 1, chars),
+    Builtin::in_module(MODULE, "lines", 1, 1, lines),
+    Builtin::in_module(MODULE, "str-reverse", 1, 1, str_reverse),
+    Builtin::in_module(MODULE, "index-of", 2, 2, index_of),
+    Builtin::in_module(MODULE, "replace-first", 3, 3, replace_first),
+    Builtin::in_module(MODULE, "to-uppercase", 1, 1, to_uppercase),
+    Builtin::in_module(MODULE, "to-lowercase", 1, 1, to_lowercase),
+    Builtin::in_module(MODULE, "to-titlecase", 1, 1, to_titlecase),
+    Builtin::in_module(MODULE, "to-sentencecase", 1, 1, to_sentencecase),
+    Builtin::in_module(MODULE, "to-snakecase", 1, 1, to_snakecase),
+    Builtin::in_module(MODULE, "to-camelcase", 1, 1, to_camelcase),
+    Builtin::in_module(MODULE, "strip-html", 1, 1, strip_html),
+    Builtin::in_module(MODULE, "spintax", 2, 2, spintax),
+];
+
 inventory::submit! { Builtin::in_module(MODULE, "lstrip",        1, 1, lstrip) }
 inventory::submit! { Builtin::in_module(MODULE, "rstrip",        1, 1, rstrip) }
 inventory::submit! { Builtin::in_module(MODULE, "truncate",      2, 2, truncate) }

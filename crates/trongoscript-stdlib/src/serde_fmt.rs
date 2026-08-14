@@ -262,6 +262,27 @@ fn yaml_key(k: &serde_yaml::Value, path: &str) -> Result<String, BuiltinError> {
     }
 }
 
+/// Every builtin this module defines.
+///
+/// This slice, not the `inventory::submit!` calls below, is what makes the
+/// module work on `wasm32-unknown-unknown`: inventory registers through a
+/// link section, and nothing in a wasm build references these functions by
+/// name, so the linker drops them before the constructors that would have
+/// registered them ever run. Naming them in an ordinary `static` keeps them
+/// alive and makes registration a plain array walk.
+///
+/// The `inventory::submit!` calls stay so a host can still add builtins that
+/// way on a native target.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::in_module(MODULE, "to-trongo", 1, 2, to_trongo),
+    Builtin::in_module(MODULE, "to-json", 1, 2, to_json),
+    Builtin::in_module(MODULE, "to-yaml", 1, 1, to_yaml),
+    Builtin::in_module(MODULE, "to-toml", 1, 2, to_toml),
+    Builtin::in_module(MODULE, "parse-json", 1, 1, parse_json),
+    Builtin::in_module(MODULE, "parse-yaml", 1, 1, parse_yaml),
+    Builtin::in_module(MODULE, "parse-toml", 1, 1, parse_toml),
+];
+
 inventory::submit! { Builtin::in_module(MODULE, "to-trongo",  1, 2, to_trongo) }
 inventory::submit! { Builtin::in_module(MODULE, "to-json",    1, 2, to_json) }
 inventory::submit! { Builtin::in_module(MODULE, "to-yaml",    1, 1, to_yaml) }
