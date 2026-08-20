@@ -688,3 +688,194 @@ fn thread_last_threads_opaque_result_and_suspends() {
         panic!("expected Suspended(List(...))");
     }
 }
+
+// ---------------------------------------------------------------------------
+// cond, and the `:elsif` / `:else` markers in `if`
+//
+// Both are structural rewrites to plain nested `if`s, so what these pin is
+// that the rewrite happens *before* the partial evaluator sees the form —
+// it never has to learn either spelling.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cond_with_known_tests_folds_completely() {
+    let mut ctx = pe_ctx();
+    assert_eq!(
+        done_num(pe(
+            r#"(cond (= 1 2) 10 (= 1 1) 20 :else 30)"#,
+            &mut ctx,
+            &opaque(&[])
+        )),
+        20.0
+    );
+}
+
+#[test]
+fn cond_with_no_match_folds_to_nil() {
+    let mut ctx = pe_ctx();
+    assert_eq!(
+        done_val(pe("(cond false 1 false 2)", &mut ctx, &opaque(&[]))),
+        Value::Null
+    );
+}
+
+#[test]
+fn cond_reaching_an_opaque_test_suspends() {
+    let mut ctx = pe_ctx();
+    let expr = trongoscript_parser::parse_expr("(cond (run-activity :c) 1 :else 2)").unwrap();
+    assert!(matches!(
+        partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap(),
+        Partial::Suspended(_)
+    ));
+}
+
+/// An earlier test that is *known false* is discarded, so the residual
+/// starts at the first branch that could not be decided — the same folding
+/// a nested `if` would get.
+#[test]
+fn cond_folds_away_decided_leading_clauses() {
+    let mut ctx = pe_ctx();
+    let expr =
+        trongoscript_parser::parse_expr("(cond false 1 (run-activity :c) 2 :else 3)").unwrap();
+    let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
+    if let Partial::Suspended(Expr::List(items)) = r {
+        // The `false` clause is gone; what remains is the `if` for the
+        // opaque test.
+        assert_eq!(items[0], Expr::Symbol("if".into()));
+        assert!(matches!(&items[1], Expr::List(_)));
+        assert_eq!(items[2], Expr::Int(2));
+        assert_eq!(items[3], Expr::Int(3));
+    } else {
+        panic!("expected Suspended(List(if ...))");
+    }
+}
+
+/// A `cond` whose taken branch is decided folds even when a *later* branch
+/// contains an opaque form, because the later branch is never reached.
+#[test]
+fn cond_ignores_opaque_forms_in_branches_it_does_not_take() {
+    let mut ctx = pe_ctx();
+    assert_eq!(
+        done_num(pe(
+            "(cond true 1 :else (run-activity :c))",
+            &mut ctx,
+            &opaque(&["run-activity"])
+        )),
+        1.0
+    );
+}
+
+#[test]
+fn if_markers_fold_like_the_positional_form() {
+    let mut ctx = pe_ctx();
+    assert_eq!(
+        done_num(pe("(if false 1 :else 2)", &mut ctx, &opaque(&[]))),
+        2.0
+    );
+    assert_eq!(
+        done_num(pe(
+            "(if false 1 :elsif true 2 :else 3)",
+            &mut ctx,
+            &opaque(&[])
+        )),
+        2.0
+    );
+    assert_eq!(
+        done_num(pe(
+            "(if false 1 :elsif false 2 :else 3)",
+            &mut ctx,
+            &opaque(&[])
+        )),
+        3.0
+    );
+}
+
+/// The residual of a marker-spelled `if` is the ordinary positional `if`.
+/// Markers are punctuation, so they leave no trace in the suspended form
+/// that gets persisted and resumed.
+#[test]
+fn if_marker_residual_is_a_plain_positional_if() {
+    let mut ctx = pe_ctx();
+    let expr =
+        trongoscript_parser::parse_expr("(if (run-activity :c) 1 :elsif false 2 :else 3)").unwrap();
+    let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
+    if let Partial::Suspended(Expr::List(items)) = r {
+        assert_eq!(items[0], Expr::Symbol("if".into()));
+        assert_eq!(items.len(), 4);
+        // No keyword markers survive into the residual.
+        assert!(!items.iter().any(|i| matches!(i, Expr::Keyword(_))));
+    } else {
+        panic!("expected Suspended(List(if ...))");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Destructuring in `let` bindings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn destructuring_let_folds_when_the_value_is_known() {
+    let mut ctx = pe_ctx();
+    assert_eq!(
+        done_num(pe("(let [[a b] [1 2]] (+ a b))", &mut ctx, &opaque(&[]))),
+        3.0
+    );
+    assert_eq!(
+        done_num(pe(
+            r#"(let [{:a x :b y} {:a 1 :b 2}] (+ x y))"#,
+            &mut ctx,
+            &opaque(&[])
+        )),
+        3.0
+    );
+}
+
+/// Destructured names are visible to the bindings that follow, the same way
+/// a plain `let` binding is.
+#[test]
+fn destructured_names_are_visible_to_later_bindings() {
+    let mut ctx = pe_ctx();
+    assert_eq!(
+        done_num(pe(
+            "(let [[a b] [1 2] c (+ a b)] c)",
+            &mut ctx,
+            &opaque(&[])
+        )),
+        3.0
+    );
+}
+
+/// A binding whose value is opaque suspends before any matching happens, and
+/// the pattern is re-emitted verbatim so it can be matched next cycle.
+#[test]
+fn destructuring_let_suspends_on_an_opaque_value() {
+    let mut ctx = pe_ctx();
+    let expr = trongoscript_parser::parse_expr("(let [[a b] (run-activity :c)] (+ a b))").unwrap();
+    let r = partial_eval(&expr, &mut ctx, &opaque(&["run-activity"])).unwrap();
+    if let Partial::Suspended(Expr::List(items)) = r {
+        assert_eq!(items[0], Expr::Symbol("let".into()));
+        let Expr::Vector(bindings) = &items[1] else {
+            panic!("expected a bindings vector");
+        };
+        // The pattern survives as an ordinary vector, which is what lets it
+        // re-read as a pattern on resume.
+        assert_eq!(
+            bindings[0],
+            Expr::Vector(vec![Expr::Symbol("a".into()), Expr::Symbol("b".into())])
+        );
+    } else {
+        panic!("expected Suspended(List(let ...))");
+    }
+}
+
+/// A pattern that cannot match a *known* value fails during partial
+/// evaluation rather than being deferred to resume time.
+#[test]
+fn destructuring_let_mismatch_errors_during_partial_eval() {
+    let mut ctx = pe_ctx();
+    let expr = trongoscript_parser::parse_expr("(let [[a b] [1]] a)").unwrap();
+    assert!(matches!(
+        partial_eval(&expr, &mut ctx, &opaque(&[])),
+        Err(EvalError::PatternMismatch { .. })
+    ));
+}

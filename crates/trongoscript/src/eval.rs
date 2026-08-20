@@ -14,6 +14,7 @@ use trongoscript_stdlib::{find_builtin_for, BuiltinError, BuiltinResult, Value};
 use crate::error::{EvalError, EvalResult};
 use crate::fuel::{Fuel, FuelLimits};
 use crate::modules::{is_known_module, ts_module_source};
+use crate::pattern::Pattern;
 use crate::sandbox::{IncludeStack, Sandbox};
 use crate::value::{fn_handle, is_truthy, make_fn_value};
 
@@ -112,7 +113,9 @@ pub struct MacroDef {
 /// Lisp/Scheme/Clojure semantics).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Closure {
-    pub params: Vec<String>,
+    /// One binding form per fixed parameter. A plain name compiles to
+    /// [`Pattern::Bind`], so the common case costs one enum tag.
+    pub params: Vec<Pattern>,
     pub rest_param: Option<String>,
     pub body: Vec<Expr>,
     pub captured_lexical: Vec<HashMap<String, Value>>,
@@ -355,6 +358,7 @@ fn eval_list(items: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
                 )))
             }
             "if" => return special_if(&items[1..], ctx),
+            "cond" => return special_cond(&items[1..], ctx),
             "let" => return special_let(&items[1..], ctx),
             "do" => return special_do(&items[1..], ctx),
             "def" => return special_def(&items[1..], ctx),
@@ -578,7 +582,156 @@ fn quote_to_value(e: &Expr) -> Value {
     }
 }
 
+/// True if `e` is the keyword marker `name`.
+///
+/// The markers are keywords (`:elsif`, `:else`), not bare symbols. A bare
+/// `else` would have to be a special-cased unbound symbol, which surprises
+/// anyone who happens to `def` a variable by that name. Trongoscript
+/// resolves symbols at eval time and cannot catch the collision the way a
+/// language with a compile phase could. A keyword is a literal that is
+/// always truthy, so it needs no special casing to work as a final test.
+fn is_marker(e: &Expr, name: &str) -> bool {
+    matches!(e, Expr::Keyword(k) if k == name)
+}
+
+/// Rewrite `if` arguments into the plain positional `[cond, then, else?]`
+/// shape, expanding the `:elsif` / `:else` markers.
+///
+/// ```text
+/// (if c t)                            => (if c t)
+/// (if c t e)                          => (if c t e)          ; today's form
+/// (if c t :else e)                    => (if c t e)
+/// (if c1 t1 :elsif c2 t2 :else e)     => (if c1 t1 (if c2 t2 e))
+/// ```
+///
+/// The markers are punctuation inside the existing `if`, not a new form —
+/// every spelling produces the same node, so the AST records no sugar.
+///
+/// This runs before dispatch rather than inside `special_if`, so the partial
+/// evaluator sees only the normalized shape and needs to know nothing about
+/// the markers.
+fn normalize_if(args: &[Expr]) -> EvalResult<Vec<Expr>> {
+    // A marker only counts in *marker position* — index 2, after a complete
+    // test/body pair. Anywhere else a keyword is an ordinary value, and it
+    // has to stay one: `(if :else 1 2)` tests the always-truthy keyword
+    // `:else`, and `cond`'s expansion to nested `if`s produces exactly that
+    // shape for a `:else` clause.
+    if args.len() < 3 || !(is_marker(&args[2], "elsif") || is_marker(&args[2], "else")) {
+        return Ok(args.to_vec());
+    }
+
+    // Collect `(test, then)` pairs and the optional trailing else.
+    let mut clauses: Vec<(Expr, Expr)> = Vec::new();
+    let mut final_else: Option<Expr> = None;
+    let mut i = 0;
+
+    loop {
+        if i + 1 >= args.len() {
+            return Err(EvalError::InvalidForm(
+                "if: expected a test and a body before the next marker".into(),
+            ));
+        }
+        clauses.push((args[i].clone(), args[i + 1].clone()));
+        i += 2;
+
+        if i == args.len() {
+            break;
+        }
+        if is_marker(&args[i], "elsif") {
+            i += 1;
+            continue;
+        }
+        if is_marker(&args[i], "else") {
+            if i + 1 >= args.len() {
+                return Err(EvalError::InvalidForm(
+                    "if: `:else` must be followed by a body".into(),
+                ));
+            }
+            if i + 2 != args.len() {
+                return Err(EvalError::InvalidForm(
+                    "if: `:else` must be the last clause".into(),
+                ));
+            }
+            final_else = Some(args[i + 1].clone());
+            break;
+        }
+        return Err(EvalError::InvalidForm(format!(
+            "if: expected `:elsif` or `:else`, got {}",
+            args[i]
+        )));
+    }
+
+    // Fold right-to-left so the innermost `if` carries the final else.
+    let mut acc = final_else;
+    for (test, then) in clauses.into_iter().rev() {
+        let mut node = vec![Expr::Symbol("if".into()), test, then];
+        if let Some(e) = acc {
+            node.push(e);
+        }
+        acc = Some(Expr::List(node));
+    }
+
+    // `acc` is the outermost `(if ...)`; return its arguments so the caller
+    // sees the same shape it would for a positional `if`.
+    match acc {
+        Some(Expr::List(items)) => Ok(items[1..].to_vec()),
+        _ => unreachable!("normalize_if always builds at least one clause"),
+    }
+}
+
+/// `(cond test expr test expr ... :else expr)`
+///
+/// Flat test/expression pairs, matching `let`'s flat pairs rather than
+/// djrb's parenthesized `(clause body)` shape — flat pairs are the house
+/// style here.
+///
+/// `:else` needs no special casing: it is a keyword literal, so it is always
+/// truthy and simply works as the last test. A `cond` with no matching
+/// clause and no `:else` evaluates to nil, like a one-armed `if`.
+fn special_cond(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
+    if !args.len().is_multiple_of(2) {
+        return Err(EvalError::InvalidForm(
+            "cond requires an even number of forms (test/expression pairs)".into(),
+        ));
+    }
+    let mut i = 0;
+    while i < args.len() {
+        let test = eval(&args[i], ctx)?;
+        if is_truthy(&test) {
+            return eval(&args[i + 1], ctx);
+        }
+        i += 2;
+    }
+    Ok(Value::Null)
+}
+
+/// Expand `cond` clauses to the equivalent nested `if`.
+///
+/// Used by the partial evaluator, which needs a form it already knows how to
+/// split across a suspension boundary. `special_cond` evaluates the flat
+/// pairs directly instead, since building the nested form only to walk it
+/// would be wasted work at runtime.
+fn cond_to_ifs(args: &[Expr]) -> EvalResult<Expr> {
+    if !args.len().is_multiple_of(2) {
+        return Err(EvalError::InvalidForm(
+            "cond requires an even number of forms (test/expression pairs)".into(),
+        ));
+    }
+    // No clauses at all: nil, like a `cond` that matches nothing.
+    let mut acc = Expr::Nil;
+    for pair in args.chunks(2).rev() {
+        acc = Expr::List(vec![
+            Expr::Symbol("if".into()),
+            pair[0].clone(),
+            pair[1].clone(),
+            acc,
+        ]);
+    }
+    Ok(acc)
+}
+
 fn special_if(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
+    let args = normalize_if(args)?;
     if args.len() < 2 || args.len() > 3 {
         return Err(EvalError::Arity {
             function: "if".into(),
@@ -696,17 +849,21 @@ fn special_let(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let result: EvalResult<Value> = (|| {
         let mut i = 0;
         while i < bindings.len() {
-            let name = match &bindings[i] {
-                Expr::Symbol(s) => s.clone(),
-                other => {
-                    return Err(EvalError::InvalidForm(format!(
-                        "let binding name must be a symbol, got {:?}",
-                        other
-                    )))
-                }
-            };
+            // A binding form is a bare symbol (the today-form) or a
+            // destructuring pattern. `let` stays sequential either way:
+            // each binding is visible to the ones after it.
+            let pattern = Pattern::compile(&bindings[i])?;
             let value = eval(&bindings[i + 1], ctx)?;
-            ctx.bind(&name, value);
+            match &pattern {
+                Pattern::Bind(name) => ctx.bind(name, value),
+                _ => {
+                    let mut binds = Vec::new();
+                    pattern.match_value(&value, &mut binds)?;
+                    for (name, v) in binds {
+                        ctx.bind(&name, v);
+                    }
+                }
+            }
             i += 2;
         }
         let mut last = Value::Null;
@@ -761,7 +918,15 @@ fn special_def(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
 // `(defn name [params...] body...)` is sugar for `(def name (fn [...] body))`.
 // ---------------------------------------------------------------------------
 
-fn parse_param_list(params_vec: &[Expr]) -> EvalResult<(Vec<String>, Option<String>)> {
+/// Parse a `fn` / `defn` parameter list into fixed parameters plus an
+/// optional `& rest` name.
+///
+/// A parameter is a bare symbol or a destructuring pattern — the same
+/// matcher `let` uses, since a parameter list is a vector of binding forms
+/// and the machinery is identical. Destructuring earns the most here:
+/// `map` over a vector of maps is the most common higher-order shape in a
+/// config document, and today every such lambda opens with `get` calls.
+fn parse_param_list(params_vec: &[Expr]) -> EvalResult<(Vec<Pattern>, Option<String>)> {
     let mut params = Vec::new();
     let mut rest_param = None;
     let mut iter = params_vec.iter();
@@ -786,13 +951,7 @@ fn parse_param_list(params_vec: &[Expr]) -> EvalResult<(Vec<String>, Option<Stri
                     ));
                 }
             }
-            Expr::Symbol(s) => params.push(s.clone()),
-            other => {
-                return Err(EvalError::InvalidForm(format!(
-                    "fn parameter must be a symbol, got {:?}",
-                    other
-                )))
-            }
+            other => params.push(Pattern::compile(other)?),
         }
     }
     Ok((params, rest_param))
@@ -913,8 +1072,23 @@ fn call_closure_inner(handle: usize, args: &[Value], ctx: &mut Context) -> EvalR
     let saved_lexical = ctx.scopes.split_off(1);
     ctx.scopes.extend(closure.captured_lexical.iter().cloned());
     let mut arg_frame: HashMap<String, Value> = HashMap::new();
-    for (i, p) in closure.params.iter().enumerate() {
-        arg_frame.insert(p.clone(), args[i].clone());
+    let mut bind_result = Ok(());
+    for (p, arg) in closure.params.iter().zip(args.iter()) {
+        match p {
+            Pattern::Bind(name) => {
+                arg_frame.insert(name.clone(), arg.clone());
+            }
+            _ => {
+                let mut binds = Vec::new();
+                if let Err(e) = p.match_value(arg, &mut binds) {
+                    bind_result = Err(e);
+                    break;
+                }
+                for (name, v) in binds {
+                    arg_frame.insert(name, v);
+                }
+            }
+        }
     }
     if let Some(rest_name) = closure.rest_param.as_ref() {
         let rest: Vec<Value> = args[fixed..].to_vec();
@@ -922,15 +1096,16 @@ fn call_closure_inner(handle: usize, args: &[Value], ctx: &mut Context) -> EvalR
     }
     ctx.scopes.push(arg_frame);
 
-    let result: EvalResult<Value> = (|| {
+    let result: EvalResult<Value> = bind_result.and_then(|()| {
         let mut last = Value::Null;
         for e in &closure.body {
             last = eval(e, ctx)?;
         }
         Ok(last)
-    })();
+    });
 
-    // Restore.
+    // Restore. This runs even when a parameter pattern failed to match, so
+    // the caller's lexical frames are not left swapped out.
     ctx.scopes.truncate(1);
     ctx.scopes.extend(saved_lexical);
     result
@@ -1739,9 +1914,20 @@ fn partial_eval_list(
             return partial_eval(&threaded, ctx, opaque_forms);
         }
 
-        // `if`: only reduce the live branch.
+        // `if`: only reduce the live branch. Markers are normalized away
+        // first, so this sees only the positional `[cond, then, else?]`
+        // shape.
         if name == "if" {
-            return partial_eval_if(&items[1..], ctx, opaque_forms);
+            let args = normalize_if(&items[1..])?;
+            return partial_eval_if(&args, ctx, opaque_forms);
+        }
+
+        // `cond`: a pure structural rewrite to nested `if`s, partially
+        // evaluated as such. A `cond` whose first tests are known folds away
+        // even when a later branch suspends.
+        if name == "cond" {
+            let expanded = cond_to_ifs(&items[1..])?;
+            return partial_eval(&expanded, ctx, opaque_forms);
         }
 
         // Sequencing and binding forms that *can* be split across a suspension
@@ -1950,15 +2136,7 @@ fn partial_eval_let(
         let mut suspended = false;
         while i < bindings.len() {
             let name_expr = &bindings[i];
-            let name = match name_expr {
-                Expr::Symbol(s) => s.clone(),
-                other => {
-                    return Err(EvalError::InvalidForm(format!(
-                        "let binding name must be a symbol, got {:?}",
-                        other
-                    )))
-                }
-            };
+            let pattern = Pattern::compile(name_expr)?;
             if suspended {
                 // Already suspended: keep the remaining bindings verbatim.
                 reduced_bindings.push(name_expr.clone());
@@ -1968,7 +2146,19 @@ fn partial_eval_let(
             }
             match partial_eval(&bindings[i + 1], ctx, opaque_forms)? {
                 Partial::Done(v) => {
-                    ctx.bind(&name, v.clone());
+                    // The value is known, so a destructuring bind can be
+                    // performed here and its names made visible to the
+                    // bindings that follow.
+                    match &pattern {
+                        Pattern::Bind(name) => ctx.bind(name, v.clone()),
+                        _ => {
+                            let mut binds = Vec::new();
+                            pattern.match_value(&v, &mut binds)?;
+                            for (name, bound) in binds {
+                                ctx.bind(&name, bound);
+                            }
+                        }
+                    }
                     reduced_bindings.push(name_expr.clone());
                     reduced_bindings.push(value_to_expr(&v));
                 }

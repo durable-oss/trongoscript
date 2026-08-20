@@ -46,6 +46,16 @@ pub enum EvalError {
     #[error("map key must be a string or keyword (got {0})")]
     BadMapKey(String),
 
+    /// A destructuring pattern could not be matched against the value it was
+    /// handed.
+    ///
+    /// This raises rather than binding nil on purpose. Silent nil-binding is
+    /// how a typo'd key in a config file becomes a `null` in the emitted
+    /// YAML and a production incident hours later, so a bind that cannot
+    /// succeed fails loudly with the offending key or arity in the message.
+    #[error("pattern {pattern} does not match: {reason}")]
+    PatternMismatch { pattern: String, reason: String },
+
     /// The evaluation step budget was spent. Raised by
     /// [`Fuel::charge_step`](crate::fuel::Fuel::charge_step); usually means
     /// a non-terminating loop or recursion.

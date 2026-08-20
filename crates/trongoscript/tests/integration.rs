@@ -1295,4 +1295,204 @@ fn to_trongo_builtin_output_reparses() {
     assert_eq!(eval(text), serde_json::json!({"a": [1, 2], "b c": null}));
 }
 
+// ---------------------------------------------------------------------------
+// The emitter/reader seam, for values that look like sugar
+//
+// `to_trongo_source` and the reader live in different crates and are unit
+// tested separately: the emitter asserts what it writes, the reader asserts
+// what it accepts. Neither can catch a disagreement between them, and string
+// interpolation created a way for them to disagree — `#{` and `${` acquired
+// reader significance that the emitter had no reason to escape before.
+//
+// A value round-tripping through *both* is the only assertion that closes
+// that gap, so the sigil cases are pinned here rather than on either side.
+// ---------------------------------------------------------------------------
+
+/// A string value whose content looks like an interpolation must come back
+/// as the same string. If the emitter under-escapes, `#{x}` re-reads as a
+/// `(str x)` call and a data value has silently become a computation.
+#[test]
+fn emitted_strings_that_look_like_sugar_survive() {
+    let v = serde_json::json!({
+        "interp": "#{x}",
+        "group": "${a + b}",
+        "bare-hash": "#",
+        "bare-dollar": "$",
+        "doubled": "##{x}",
+        "brace-only": "{}",
+        "open-interp": "#{",
+        "open-group": "${",
+        "mixed": "US$5 and #1",
+        "escaped": "\\#{x}",
+        "inner": "path/#{a}/#{b}",
+    });
+    assert_eq!(round_trip(&v), v);
+    assert_eq!(round_trip_pretty(&v), v);
+}
+
+/// The same, in key position. A key that would read as an infix group
+/// cannot be emitted bare and has to fall back to a quoted string.
+#[test]
+fn emitted_keys_that_look_like_sugar_survive() {
+    let v = serde_json::json!({
+        "${x}": 1,
+        "#{x}": 2,
+        "a$b": 3,
+        "$": 4,
+        "#": 5,
+        "a${b": 6,
+    });
+    assert_eq!(round_trip(&v), v);
+    assert_eq!(round_trip_pretty(&v), v);
+}
+
+/// The in-language path for the same property: a document containing sigils
+/// makes the full trip through `to-trongo` and back.
+///
+/// Writing this test requires `\#` and `\$` in the *source*, because a bare
+/// `#{x}` in a Trongoscript string literal interpolates at read time and
+/// would never reach the value at all. That is the escape hatch working as
+/// designed, and it is asserted first so the rest of the test is clearly
+/// about the emitter and not about the reader.
+#[test]
+fn to_trongo_output_with_sigils_reparses() {
+    // The escape hatch: `\#{x}` is the literal text, not an interpolation.
+    assert_eq!(eval(r##""\#{x}""##), serde_json::json!("#{x}"));
+    assert_eq!(eval(r##""\${k}""##), serde_json::json!("${k}"));
+
+    let src = r##"(use serde) (to-trongo {:a "\#{x}" "\${k}" "US\$5"})"##;
+    let emitted = eval(src);
+    let text = emitted.as_str().expect("to-trongo returns a string");
+
+    // The emitted source re-escapes both sigils, so reading it back gives
+    // the strings rather than the calls they would otherwise become.
+    assert_eq!(eval(text), serde_json::json!({"a": "#{x}", "${k}": "US$5"}));
+}
+
+// ---------------------------------------------------------------------------
+// The new sugar, end to end through each entry point
+//
+// `eval_source` is covered by the unit tests. These pin that the other three
+// front doors — templates, embedded documents, and the sandboxed include
+// path — reach the same reader, since each parses source through its own
+// wrapper and could plausibly have missed the new forms.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn templates_accept_the_new_sugar() {
+    let mut ctx = Context::new(EvalConfig::default());
+    let tmpl = concat!(
+        "<% (def env \"prod\") (def ram 16) %>",
+        "level: <%= (cond (= env \"prod\") \"warn\" :else \"debug\") %>\n",
+        "heap: <%= ${ram * 3 / 4} %>\n",
+        "url: <%= \"https://#{env}.example.com\" %>\n",
+    );
+    let out = render_template(tmpl, &mut ctx).expect("render failed");
+    assert_eq!(
+        out,
+        "level: warn\nheap: 12\nurl: https://prod.example.com\n"
+    );
+}
+
+#[test]
+fn templates_accept_destructuring() {
+    let mut ctx = Context::new(EvalConfig::default());
+    let tmpl = concat!(
+        "<% (def server {:name \"web\" :port 443}) %>",
+        "<%= (let [{:name n :port p} server] \"#{n}:#{p}\") %>\n",
+    );
+    let out = render_template(tmpl, &mut ctx).expect("render failed");
+    assert_eq!(out, "web:443\n");
+}
+
+#[test]
+fn embedded_documents_accept_the_new_sugar() {
+    let mut ctx = Context::new(EvalConfig::default());
+    let doc: serde_yaml::Value = serde_yaml::from_str(concat!(
+        "port: \"!trongo ${8000 + 80}\"\n",
+        "level: \"!trongo (cond false \\\"a\\\" :else \\\"b\\\")\"\n",
+        "name: \"!trongo (let [{:a x} {:a \\\"web\\\"}] x)\"\n",
+    ))
+    .unwrap();
+    let v = evaluate_embedded_yaml(doc, &mut ctx).expect("embed failed");
+    let obj = v.as_object().unwrap();
+    assert_eq!(obj.get("port"), Some(&serde_json::json!(8080)));
+    assert_eq!(obj.get("level"), Some(&serde_json::json!("b")));
+    assert_eq!(obj.get("name"), Some(&serde_json::json!("web")));
+}
+
+/// An included file is read by the same reader, so sugar written in a
+/// library file works the same as sugar written inline.
+#[test]
+fn included_files_accept_the_new_sugar() {
+    let dir = std::env::temp_dir().join(format!(
+        "trongo-sugar-include-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("lib.trongo");
+    std::fs::write(
+        &lib,
+        r##"(defn label [{:name n :port p}] "#{n}:${p + 1}")"##,
+    )
+    .unwrap();
+
+    let sb = Sandbox::new(&dir).unwrap();
+    let mut ctx = Context::new(EvalConfig::default().with_sandbox(sb));
+    let v = eval_source(
+        r#"(include "/lib.trongo") (label {:name "web" :port 442})"#,
+        &mut ctx,
+    )
+    .expect("include failed");
+    assert_eq!(v, serde_json::json!("web:443"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The shape all of this exists to serve: one document using every new form
+/// together, evaluated the way a user would evaluate it.
+#[test]
+fn a_config_document_using_every_new_form() {
+    let src = r##"
+        (def env "production")
+        (def servers [{:name "web" :ram 16} {:name "worker" :ram 8}])
+
+        (defn plan [{:name n :ram r}]
+          {:name  n
+           :heap  "${r * 3 / 4}G"
+           :tier  (cond ${r >= 16} "large" ${r >= 8} "medium" :else "small")})
+
+        {:env      env
+         :log      (if (= env "production") "warn"
+                     :elsif (= env "staging") "info"
+                     :else "debug")
+         :endpoint "https://#{env}.example.com:${8000 + 443}"
+         :plans    (map plan servers)}
+    "##;
+    let v = eval(src);
+    let obj = v.as_object().unwrap();
+
+    assert_eq!(obj.get("env"), Some(&serde_json::json!("production")));
+    assert_eq!(obj.get("log"), Some(&serde_json::json!("warn")));
+    assert_eq!(
+        obj.get("endpoint"),
+        Some(&serde_json::json!("https://production.example.com:8443"))
+    );
+    assert_eq!(
+        obj.get("plans"),
+        Some(&serde_json::json!([
+            {"name": "web",    "heap": "12G", "tier": "large"},
+            {"name": "worker", "heap": "6G",  "tier": "medium"},
+        ]))
+    );
+
+    // And the whole result survives the emitter/reader round trip, so a
+    // document built with sugar can be written out and read back.
+    assert_eq!(round_trip(&v), v);
+}
+
 // Copyright (c) 2026 Durable Programming, LLC. All rights reserved.

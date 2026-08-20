@@ -26,7 +26,7 @@
 //!
 //! Comments: `;` to end-of-line, or `#_ form` to discard the next form.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 /// A Trongoscript expression / value form.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -46,6 +46,35 @@ pub enum Expr {
     Map(Vec<(Expr, Expr)>),
 }
 
+/// Write `s` as a Trongoscript string literal, escaping everything the
+/// reader would otherwise interpret.
+///
+/// This is not `{:?}`. Rust's `Debug` for `str` does not escape `#` or `$`,
+/// and since `#{` and `${` open an interpolation, a string whose *content*
+/// is `#{x}` must print as `"\#{x}"` or it reads back as a call rather than
+/// a literal. The round-trip test in `roundtrip_tests` covers exactly that.
+///
+/// Only the sigil immediately preceding `{` needs escaping, but escaping
+/// every `#` and `$` is simpler to reason about and costs nothing that
+/// matters — configuration strings are not hot.
+fn write_string_literal(f: &mut fmt::Formatter<'_>, s: &str) -> fmt::Result {
+    f.write_str("\"")?;
+    for c in s.chars() {
+        match c {
+            '"' => f.write_str("\\\"")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '\t' => f.write_str("\\t")?,
+            '\r' => f.write_str("\\r")?,
+            '\0' => f.write_str("\\0")?,
+            '#' => f.write_str("\\#")?,
+            '$' => f.write_str("\\$")?,
+            other => f.write_char(other)?,
+        }
+    }
+    f.write_str("\"")
+}
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -53,7 +82,7 @@ impl fmt::Display for Expr {
             Expr::Bool(b) => write!(f, "{}", b),
             Expr::Int(n) => write!(f, "{}", n),
             Expr::Float(n) => write!(f, "{}", n),
-            Expr::String(s) => write!(f, "{:?}", s),
+            Expr::String(s) => write_string_literal(f, s),
             Expr::Keyword(k) => write!(f, ":{}", k),
             Expr::Symbol(s) => f.write_str(s),
             Expr::List(items) => {

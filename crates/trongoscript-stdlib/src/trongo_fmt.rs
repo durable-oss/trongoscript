@@ -174,8 +174,13 @@ fn format_number(n: &serde_json::Number) -> String {
 /// Write `s` as a Trongoscript string literal, including the quotes.
 ///
 /// Escapes exactly the set the reader understands: `\n`, `\t`, `\r`, `\\`,
-/// `\"`, `\0`, and `\u{XXXX}` for the remaining control characters. Every
-/// other character, including non-ASCII, is emitted literally.
+/// `\"`, `\0`, `\#`, `\$`, and `\u{XXXX}` for the remaining control
+/// characters. Every other character, including non-ASCII, is emitted
+/// literally.
+///
+/// `#` and `$` are escaped because `#{` and `${` open a string
+/// interpolation. A value whose content is `#{x}` must be written `"\#{x}"`
+/// or it reads back as a `(str x)` call rather than the literal it was.
 fn write_string(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
@@ -186,6 +191,8 @@ fn write_string(s: &str, out: &mut String) {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\0' => out.push_str("\\0"),
+            '#' => out.push_str("\\#"),
+            '$' => out.push_str("\\$"),
             c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", c as u32)),
             c => out.push(c),
         }
@@ -210,7 +217,10 @@ fn write_key(k: &str, out: &mut String) {
 /// entirely of symbol characters. A `:` inside the name is excluded because
 /// the reader would stop there, leaving a trailing fragment behind.
 fn is_keyword_safe(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(is_symbol_char)
+    // `${` opens an infix group, and `$` is otherwise a legal symbol
+    // character, so a name containing the two-char sequence has to fall
+    // back to a quoted string. `#` is already excluded by `is_symbol_char`.
+    !name.is_empty() && !name.contains("${") && name.chars().all(is_symbol_char)
 }
 
 /// Mirrors the reader's `is_symbol_char`: everything except whitespace, the
@@ -302,6 +312,28 @@ mod tests {
     #[test]
     fn other_control_chars_use_unicode_escapes() {
         assert_eq!(to_source(&json!("a\u{1}b")), r#""a\u{1}b""#);
+    }
+
+    /// `#{` and `${` open a string interpolation in the reader, so a value
+    /// whose content happens to look like one must be escaped on the way
+    /// out. Without this, emitting `#{x}` and reading it back yields a
+    /// `(str x)` call instead of the string it started as.
+    #[test]
+    fn interpolation_sigils_are_escaped() {
+        assert_eq!(to_source(&json!("#{x}")), r##""\#{x}""##);
+        assert_eq!(to_source(&json!("${a + b}")), r#""\${a + b}""#);
+        // Bare sigils are escaped too — harmless, and simpler than
+        // tracking whether a `{` follows.
+        assert_eq!(to_source(&json!("a#b")), r##""a\#b""##);
+        assert_eq!(to_source(&json!("US$5")), r#""US\$5""#);
+    }
+
+    /// A map key that would read as an infix group cannot be emitted as a
+    /// bare keyword.
+    #[test]
+    fn keys_that_look_like_infix_groups_become_strings() {
+        let out = to_source(&json!({"${x}": 1}));
+        assert_eq!(out, r#"{"\${x}" 1}"#);
     }
 
     #[test]

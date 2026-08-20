@@ -583,7 +583,7 @@ fn guess_format_from_path(p: &std::path::Path) -> Option<Format> {
 
 /// The `--help` text. Kept as a raw string rather than a `print!` argument so
 /// the `{...}` map and spintax syntax below need no brace doubling.
-const HELP: &str = r#"Trongoscript — a Lisp-flavored DSL for nested data.
+const HELP: &str = r###"Trongoscript — a Lisp-flavored DSL for nested data.
 
 Atoms:
   42  3.14  -7   true  false  nil
@@ -594,9 +594,31 @@ Compound:
   [a b c]                 ; vector
   {:k v :k2 v2}           ; map (alternating keys/values)
 
+Sugar:
+  Every sugar below is shorthand for an s-expression, and that expansion is
+  its definition — the two forms are the same program. The s-expression is
+  always available and the sugar is never required, so a .trongo file
+  written by someone else has no syntax whose meaning you cannot recover by
+  expanding it.
+
+  "a#{x}b"                ; => (str "a" x "b")   string interpolation
+  "#{host}:#{port}"       ; => (str host ":" port)
+  ${a + b * c}            ; => (+ a (* b c))     infix group
+  ${(a + b) / 2}          ; => (/ (+ a b) 2)     parens group, not call
+  "heap: ${n * 3 / 4}"    ; a group inside a string
+
+  A string with no interpolation stays a plain string. Write a literal
+  sigil as \# or \$. Inside ${...}: * / % + - > >= < <= = != and or, plus
+  unary - and not, at Ruby's precedence. `%` means `mod` and `!=` means
+  `not=`; both spellings call the same function. One expression per group.
+  A `-` with no space around it belongs to the symbol, since names are
+  kebab-case: write `a - b` for subtraction, `a-b` is one name.
+
 Special forms:
   (let [n v ...] body...)
   (if cond then else?)
+  (if c1 t1 :elsif c2 t2 :else e)   ; markers; same node as nested ifs
+  (cond test expr ... :else expr)   ; flat pairs; nil if nothing matches
   (when cond body...)
   (-> x (f a) g ...)      ; thread x as first arg of each step
   (->> x (f a) g ...)     ; thread x as last arg of each step
@@ -604,6 +626,19 @@ Special forms:
   (def name value)
   (defmacro name [params] body...)        ; & rest params supported
   (macroexpand 'form)
+
+Destructuring (in `let` bindings and `fn`/`defn` parameters):
+  (let [[host port]       addr             ; by position
+        [first & rest]    xs               ; & binds the remainder
+        {:name n :port p} server]          ; by key
+    ...)
+  (defn describe [{:name n :port p}] ...)  ; same in parameter lists
+
+  A vector pattern needs an exact length unless it has an `& rest` tail. A
+  map pattern needs at least its named keys and ignores any others, so a
+  document can gain fields without breaking existing patterns. A pattern
+  that cannot match raises, naming the missing key or the arity — it never
+  binds nil.
   (and ...)  (or ...)
   (quote x)               also 'x
   (quasiquote x)          also `x
@@ -659,7 +694,7 @@ Examples:
   trongo convert -i config.yaml         # YAML => Trongoscript literal
   trongo convert -i data.json --pretty  # indented, one key per line
   trongo convert -i x.toml --to yaml    # any format pair, no evaluation
-"#;
+"###;
 
 fn print_help() {
     print!("{HELP}");

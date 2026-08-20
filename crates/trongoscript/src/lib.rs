@@ -55,6 +55,7 @@ pub mod eval;
 pub mod fuel;
 pub mod higher_order;
 pub mod modules;
+pub mod pattern;
 pub mod rng;
 pub mod sandbox;
 pub mod template;

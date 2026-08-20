@@ -11,7 +11,14 @@
 //!   - [`parse_template`] — parse an ERB-like template document.
 
 pub mod ast;
+mod infix;
+#[cfg(test)]
+mod interp_tests;
+#[cfg(test)]
+mod roundtrip_tests;
 mod template;
+
+use infix::infix_group;
 
 pub use ast::*;
 pub use template::parse_template;
@@ -311,6 +318,12 @@ pub(crate) fn form(input: &str) -> PResult<Expr> {
     // the recursion depth needs guarding.
     nested(input, |input| {
         alt((
+            // `${` must be checked before `symbol_form`: `$` is a legal
+            // symbol char, so `$` alone would otherwise be munched into a
+            // symbol. A symbol can never contain `{`, so there is no
+            // ambiguity to resolve — this is a pure prepend, and a bare `$`
+            // still reads as a symbol.
+            infix_group,
             quote_form,
             quasiquote_form,
             unquote_form,
@@ -437,9 +450,22 @@ fn map_form(input: &str) -> PResult<Expr> {
     Ok((input, Expr::Map(pairs)))
 }
 
+/// A double-quoted string, with `#{expr}` interpolation.
+///
+/// A string containing no interpolation stays an [`Expr::String`]. One that
+/// does interpolate desugars to `(str ...)` over its alternating literal and
+/// expression segments — and that desugaring is the definition: `"a#{x}b"`
+/// and `(str "a" x "b")` are the same AST after read.
+///
+/// Keeping the no-interpolation case a literal matters: map keys are
+/// frequently strings, and turning every one of them into a call would cost
+/// constant-folding everywhere for a feature most strings do not use.
 fn string_form(input: &str) -> PResult<Expr> {
     let (input, _) = nom_char('"')(input)?;
     let mut out = String::new();
+    // Non-empty only once an interpolation has been seen. `out` holds the
+    // literal text accumulated since the last segment boundary.
+    let mut segments: Vec<Expr> = Vec::new();
     let mut rest = input;
     loop {
         match rest.chars().next() {
@@ -453,7 +479,44 @@ fn string_form(input: &str) -> PResult<Expr> {
             }
             Some('"') => {
                 let (after, _) = nom_char('"')(rest)?;
-                return Ok((after, Expr::String(out)));
+                if segments.is_empty() {
+                    return Ok((after, Expr::String(out)));
+                }
+                // Trailing literal, if any. An empty tail contributes
+                // nothing to the concatenation and is dropped.
+                if !out.is_empty() {
+                    segments.push(Expr::String(out));
+                }
+                let mut call = Vec::with_capacity(segments.len() + 1);
+                call.push(Expr::Symbol("str".to_string()));
+                call.extend(segments);
+                return Ok((after, Expr::List(call)));
+            }
+            // `#{ expr }` interpolates; `${ infix }` interpolates an infix
+            // group. A bare `#` or `$` not followed by `{` is ordinary
+            // string content.
+            Some(c @ ('#' | '$')) if rest[c.len_utf8()..].starts_with('{') => {
+                if !out.is_empty() {
+                    segments.push(Expr::String(std::mem::take(&mut out)));
+                }
+                let (after, expr) = if c == '#' {
+                    // `#{` — the body is an ordinary form. Consume the
+                    // braces here and let `form` handle everything between,
+                    // including nested strings that interpolate in turn.
+                    let (b, _) = nom_char('{')(&rest['#'.len_utf8()..])?;
+                    let (b, _) = ws(b)?;
+                    let (b, e) = cut(form)(b)?;
+                    let (b, _) = ws(b)?;
+                    let (b, _) = cut(nom_char('}'))(b)?;
+                    (b, e)
+                } else {
+                    // `${` — the same production as an infix group outside
+                    // a string, value interpolated rather than returned.
+                    // `infix_group` expects to see the `$` itself.
+                    infix_group(rest)?
+                };
+                segments.push(expr);
+                rest = after;
             }
             Some('\\') => {
                 let mut iter = rest.chars();
@@ -474,6 +537,10 @@ fn string_form(input: &str) -> PResult<Expr> {
                     '\\' => out.push('\\'),
                     '"' => out.push('"'),
                     '0' => out.push('\0'),
+                    // `\#` and `\$` write a literal sigil, so `\#{` is the
+                    // escape hatch out of interpolation.
+                    '#' => out.push('#'),
+                    '$' => out.push('$'),
                     'u' => {
                         let (after, hex) = delimited(
                             nom_char::<&str, VerboseError<&str>>('{'),
