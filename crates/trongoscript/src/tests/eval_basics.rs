@@ -186,3 +186,11 @@ fn cons_and_list_builtins() {
     assert_eq!(eval_str("(list? (list 1))"), Value::Bool(true));
     assert_eq!(eval_str("(list? 5)"), Value::Bool(false));
 }
+
+#[test]
+fn deep_merge_overlays_nested_maps() {
+    assert_eq!(
+        eval_str("(deep-merge {:db {:host \"localhost\" :port 5432}} {:db {:host \"prod\"}})"),
+        serde_json::json!({"db": {"host": "prod", "port": 5432}})
+    );
+}
