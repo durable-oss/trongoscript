@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use trongoscript_parser::{parse_module, Expr, Module};
 use trongoscript_stdlib::{find_builtin_for, BuiltinError, BuiltinResult, Value};
@@ -111,6 +112,9 @@ pub struct MacroDef {
 /// not captured — they're read live from `scopes[0]` at call time, so
 /// `def`s installed after closure creation are visible (matching common
 /// Lisp/Scheme/Clojure semantics).
+///
+/// The captured frames are shared with the scope they came from, not
+/// copied (see [`Frame`]).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Closure {
     /// One binding form per fixed parameter. A plain name compiles to
@@ -118,13 +122,28 @@ pub struct Closure {
     pub params: Vec<Pattern>,
     pub rest_param: Option<String>,
     pub body: Vec<Expr>,
-    pub captured_lexical: Vec<HashMap<String, Value>>,
+    pub captured_lexical: Vec<Frame>,
 }
+
+/// One scope frame.
+///
+/// Frames are shared by reference count so that capturing them in a
+/// closure, and installing them again on every call, costs a refcount bump
+/// rather than a deep copy of every value in scope. Before, a closure mapped
+/// over a list it had captured copied the whole list twice per call, so a
+/// view of 500 documents made about half a million document copies, and the
+/// copies were invisible to fuel.
+///
+/// Writes go through [`Arc::make_mut`], which copies a frame only when a
+/// closure still shares it. That keeps the snapshot semantics a closure has
+/// always had: a binding added to a `let` after a closure captured it is not
+/// visible to that closure.
+pub type Frame = Arc<HashMap<String, Value>>;
 
 /// Per-invocation evaluator state.
 pub struct Context {
     /// Lexical bindings; the innermost frame is at the end.
-    scopes: Vec<HashMap<String, Value>>,
+    scopes: Vec<Frame>,
     /// User-defined macros (installed by `defmacro`).
     pub macros: HashMap<String, MacroDef>,
     /// The currently-executing file's directory (used to resolve relative
@@ -154,7 +173,10 @@ pub struct Context {
     /// First-class function registry. A `(fn ...)` or `(defn ...)` form
     /// pushes a [`Closure`] here and returns a handle [`Value`] (see
     /// [`crate::value::make_fn_value`]) that indexes into this vec.
-    pub fns: Vec<Closure>,
+    ///
+    /// Behind an `Arc` so a call can hold its closure without cloning the
+    /// body and parameters out of the registry.
+    pub fns: Vec<Arc<Closure>>,
     /// Resource meter. Charged on every `eval` node visit and every closure
     /// call; see [`crate::fuel`].
     pub fuel: Fuel,
@@ -163,7 +185,7 @@ pub struct Context {
 impl Context {
     pub fn new(config: EvalConfig) -> Self {
         Self {
-            scopes: vec![HashMap::new()],
+            scopes: vec![Frame::default()],
             macros: HashMap::new(),
             current_file_dir: None,
             includes: IncludeStack::default(),
@@ -180,9 +202,7 @@ impl Context {
     }
 
     pub fn with_data(mut self, data: HashMap<String, Value>) -> Self {
-        for (k, v) in data {
-            self.scopes[0].insert(k, v);
-        }
+        self.globals_mut().extend(data);
         self
     }
 
@@ -193,7 +213,7 @@ impl Context {
 
     /// Returns a mutable reference to the global scope.
     pub fn globals_mut(&mut self) -> &mut HashMap<String, Value> {
-        &mut self.scopes[0]
+        Arc::make_mut(&mut self.scopes[0])
     }
 
     /// Rebuilds a Context from persisted globals and closures.
@@ -207,15 +227,15 @@ impl Context {
         config: EvalConfig,
     ) -> Self {
         let mut ctx = Self::new(config);
-        ctx.scopes[0] = globals;
-        ctx.fns = fns;
+        ctx.scopes[0] = Arc::new(globals);
+        ctx.fns = fns.into_iter().map(Arc::new).collect();
         ctx.enabled_modules = enabled_modules;
         ctx.rng_state = rng_state;
         ctx
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(Frame::default());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
@@ -225,19 +245,19 @@ impl Context {
         // Top-level scope is `scopes[0]`; if we're at top-level, `def`
         // installs there. `let` always uses the innermost scope.
         let last = self.scopes.last_mut().expect("at least one scope");
-        last.insert(name.to_string(), value);
+        Arc::make_mut(last).insert(name.to_string(), value);
     }
 
     fn bind_global(&mut self, name: &str, value: Value) {
-        self.scopes[0].insert(name.to_string(), value);
+        self.globals_mut().insert(name.to_string(), value);
     }
 
-    /// Register a synthesized closure and return its function-handle [`Value`].
-    /// Used by combinators like `constantly` and `complement` that need to
-    /// produce a function value at runtime.
+    /// Register a closure and return its function-handle [`Value`]. Used by
+    /// `(fn ...)` and by combinators like `constantly` and `complement` that
+    /// need to produce a function value at runtime.
     pub(crate) fn register_closure(&mut self, closure: Closure) -> Value {
         let handle = self.fns.len();
-        self.fns.push(closure);
+        self.fns.push(Arc::new(closure));
         make_fn_value(handle)
     }
 
@@ -974,7 +994,7 @@ fn special_fn(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     let (params, rest_param) = parse_param_list(params_vec)?;
     // Capture lexical frames *above* the global frame. The global frame
     // is always read live, so def's installed later are visible.
-    let captured_lexical: Vec<HashMap<String, Value>> = if ctx.scopes.len() > 1 {
+    let captured_lexical: Vec<Frame> = if ctx.scopes.len() > 1 {
         ctx.scopes[1..].to_vec()
     } else {
         Vec::new()
@@ -985,9 +1005,7 @@ fn special_fn(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
         body: args[1..].to_vec(),
         captured_lexical,
     };
-    let handle = ctx.fns.len();
-    ctx.fns.push(closure);
-    Ok(make_fn_value(handle))
+    Ok(ctx.register_closure(closure))
 }
 
 fn special_defn(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
@@ -1094,7 +1112,7 @@ fn call_closure_inner(handle: usize, args: &[Value], ctx: &mut Context) -> EvalR
         let rest: Vec<Value> = args[fixed..].to_vec();
         arg_frame.insert(rest_name.clone(), Value::Array(rest));
     }
-    ctx.scopes.push(arg_frame);
+    ctx.scopes.push(Arc::new(arg_frame));
 
     let result: EvalResult<Value> = bind_result.and_then(|()| {
         let mut last = Value::Null;

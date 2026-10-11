@@ -40,7 +40,9 @@
 pub use inventory;
 pub use serde_json::Value;
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 pub mod collection;
@@ -220,23 +222,47 @@ static CRATE_BUILTINS: &[&[Builtin]] = &[
     string::BUILTINS,
 ];
 
-/// Look up a builtin by name, ignoring module visibility. O(N) over the
-/// registry. Prefer [`find_builtin_for`] when visibility matters.
+/// Every registered builtin grouped by name, each group in
+/// [`iter_builtins`] order.
+///
+/// The registry is fixed once inventory has collected it, so this is built
+/// on first lookup and kept. Before it existed every call a script made
+/// walked the whole registry, and `iter_builtins` ran `is_own` (itself a
+/// walk of `CRATE_BUILTINS`) on each inventory entry along the way: about
+/// (inventory entries × crate builtins) string comparisons per call, which
+/// was the largest single cost when profiling real workloads.
+fn builtin_index() -> &'static HashMap<&'static str, Vec<&'static Builtin>> {
+    static INDEX: OnceLock<HashMap<&'static str, Vec<&'static Builtin>>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut index: HashMap<&'static str, Vec<&'static Builtin>> = HashMap::new();
+        for b in iter_builtins() {
+            index.entry(b.name).or_default().push(b);
+        }
+        index
+    })
+}
+
+/// Look up a builtin by name, ignoring module visibility. Prefer
+/// [`find_builtin_for`] when visibility matters.
 pub fn find_builtin(name: &str) -> Option<&'static Builtin> {
-    iter_builtins().find(|b| b.name == name)
+    builtin_index().get(name)?.first().copied()
 }
 
 /// Look up a builtin by name, honoring module visibility. Core builtins
 /// (`module == None`) always resolve; module-scoped builtins resolve only
 /// when `is_enabled(module_name)` returns true.
+///
+/// When several builtins share a name, the first visible one in
+/// [`iter_builtins`] order wins, so the crate's own still shadow a host's.
 pub fn find_builtin_for(name: &str, is_enabled: impl Fn(&str) -> bool) -> Option<&'static Builtin> {
-    iter_builtins().find(|b| {
-        b.name == name
-            && match b.module {
-                None => true,
-                Some(m) => is_enabled(m),
-            }
-    })
+    builtin_index()
+        .get(name)?
+        .iter()
+        .copied()
+        .find(|b| match b.module {
+            None => true,
+            Some(m) => is_enabled(m),
+        })
 }
 
 /// Iterate over every registered builtin: this crate's, then any a host

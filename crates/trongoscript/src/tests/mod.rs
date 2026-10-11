@@ -1,3 +1,4 @@
+mod closure_capture;
 mod conditionals;
 mod destructuring;
 mod eval_basics;

@@ -15,7 +15,9 @@ trongoscript-parser = { path = "../trongoscript-parser" }
 trongoscript-stdlib = { path = "../trongoscript-stdlib" }
 inventory.workspace = true
 thiserror.workspace = true
-serde.workspace = true
+# `rc` serializes `Closure`'s shared frames as plain maps, so the
+# persisted format is the same as when they were not shared.
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 serde_yaml.workspace = true
 
