@@ -1,0 +1,18 @@
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# Build output
+/tmp/
+/pkg/
+/ext/trongoscript/target/
+/lib/trongoscript/*.so
+/lib/trongoscript/*.bundle
+/lib/trongoscript/*.dll
+Gemfile.lock
+/vendor/bundle/
+/.bundle/

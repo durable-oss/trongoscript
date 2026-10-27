@@ -1,0 +1,22 @@
+# frozen_string_literal: true
+
+require "bundler/gem_tasks"
+require "rake/testtask"
+require "rb_sys/extensiontask"
+
+GEMSPEC = Gem::Specification.load("trongoscript.gemspec")
+
+RbSys::ExtensionTask.new("trongoscript", GEMSPEC) do |ext|
+  # Set explicitly: the extension depends on the core crate, which is also
+  # named `trongoscript`, and rb_sys would otherwise pick that one.
+  ext.ext_dir = "ext/trongoscript"
+  ext.lib_dir = "lib/trongoscript"
+end
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test"
+  t.test_files = FileList["test/**/test_*.rb"]
+  t.warning = true
+end
+
+task default: %i[compile test]

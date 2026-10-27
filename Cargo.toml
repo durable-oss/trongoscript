@@ -29,6 +29,12 @@ description = "A YAMLScript-inspired DSL for producing nested data structures, w
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.dependencies]
+# Internal crates. `version` is required to publish; keep it in step with
+# `workspace.package.version`.
+trongoscript = { path = "crates/trongoscript", version = "0.1.0" }
+trongoscript-parser = { path = "crates/trongoscript-parser", version = "0.1.0" }
+trongoscript-stdlib = { path = "crates/trongoscript-stdlib", version = "0.1.0" }
+
 # Parsing
 nom = "7.1"
 

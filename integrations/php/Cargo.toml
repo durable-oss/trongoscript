@@ -1,0 +1,16 @@
+[package]
+name = "trongoscript-php"
+version = "0.1.0"
+edition = "2021"
+authors = ["Durable Programming <hello@durableprogramming.com>"]
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "trongoscript"
+crate-type = ["cdylib"]
+
+[dependencies]
+trongoscript-host = { path = "../host" }
+ext-php-rs = "*"
+serde_json = "1.0"

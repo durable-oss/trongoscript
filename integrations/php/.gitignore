@@ -1,0 +1,13 @@
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+/target/
+/vendor/
+composer.lock
+.phpunit.cache/
+.phpunit.result.cache
