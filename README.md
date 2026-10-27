@@ -41,6 +41,16 @@ the same idea into a pure-Rust stack:
 | `trongoscript`          | Evaluator, sandbox, template renderer, embed walker    |
 | `trongoscript-cli`      | `trongo` CLI (eval / render / embed)                    |
 
+## Integrations
+
+| Directory                                   | Purpose                                          |
+| ------------------------------------------- | ------------------------------------------------ |
+| [`integrations/ruby`](integrations/ruby)   | `trongoscript` gem (Magnus native extension)     |
+| [`integrations/php`](integrations/php)     | `trongoscript` PHP extension (ext-php-rs)        |
+| [`integrations/host`](integrations/host)   | Shared Rust layer both bindings are built on     |
+
+Each binding has its own `devenv.nix`; see its README for usage and tests.
+
 ## CLI
 
 ```sh

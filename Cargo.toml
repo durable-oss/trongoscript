@@ -5,6 +5,14 @@ members = [
     "crates/trongoscript-parser",
     "crates/trongoscript-stdlib",
     "crates/trongoscript-cli",
+    "integrations/host",
+]
+# The language bindings link against a Ruby or PHP installation, so they
+# build from their own directories (inside their devenv shells) rather than
+# as part of `cargo test --workspace`.
+exclude = [
+    "integrations/ruby",
+    "integrations/php",
 ]
 
 [workspace.package]

@@ -398,6 +398,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trongoscript-host"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "serde_json",
+ "serde_yaml",
+ "trongoscript",
+]
+
+[[package]]
 name = "trongoscript-parser"
 version = "0.1.0"
 dependencies = [
