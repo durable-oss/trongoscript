@@ -16,7 +16,7 @@ fn value_cmp(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::Number(x), Value::Number(y)) => x
             .as_f64()
-            .and_then(|f| y.as_f64().map(|g| (f, g)))
+            .zip(y.as_f64())
             .and_then(|(f, g)| f.partial_cmp(&g)),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),

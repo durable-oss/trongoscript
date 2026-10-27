@@ -272,7 +272,7 @@ impl Sandbox {
             host_path: host,
         });
         // Longest virtual path first, so `find` is a longest-prefix match.
-        mounts.sort_by(|a, b| b.virtual_path.len().cmp(&a.virtual_path.len()));
+        mounts.sort_by_key(|m| std::cmp::Reverse(m.virtual_path.len()));
         Ok(self)
     }
 

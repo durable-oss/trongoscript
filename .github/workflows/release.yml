@@ -1,0 +1,51 @@
+name: Release
+
+# Pushing a tag like `v0.2.0` publishes every crate in the workspace to
+# crates.io and opens a GitHub release for the tag. The tag must match
+# `workspace.package.version` in Cargo.toml.
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    # crates.io's trusted publisher entry names this environment, so only
+    # runs in it can obtain a publish token. Add required reviewers to the
+    # environment in the repo settings to gate releases on approval.
+    environment: release
+    permissions:
+      contents: write # create the GitHub release
+      id-token: write # exchange the OIDC token for a crates.io token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check tag matches workspace version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "trongoscript") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match workspace version $version"
+            exit 1
+          fi
+
+      - run: cargo test --workspace --locked
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      # Publishes in dependency order and skips `publish = false` crates.
+      - run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Create GitHub release
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
