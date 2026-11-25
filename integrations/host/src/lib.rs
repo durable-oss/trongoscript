@@ -35,4 +35,4 @@ pub fn to_trongo(value: &Value, pretty: bool) -> String {
     }
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

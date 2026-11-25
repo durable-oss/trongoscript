@@ -169,4 +169,4 @@ fn non_negative(what: &str, z: &Zval) -> Result<u64, Fail> {
     u64::try_from(n).map_err(|_| value_error(format!("{what} must not be negative, got {n}")))
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

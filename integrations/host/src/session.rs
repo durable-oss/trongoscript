@@ -562,4 +562,4 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

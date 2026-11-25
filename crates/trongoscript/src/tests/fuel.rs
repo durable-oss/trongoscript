@@ -519,4 +519,4 @@ fn context_data_bindings_do_not_consume_the_budget() {
     assert_eq!(ctx.fuel.allocated(), 0);
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

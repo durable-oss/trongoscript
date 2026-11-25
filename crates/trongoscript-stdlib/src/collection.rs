@@ -343,7 +343,7 @@ inventory::submit! { Builtin::variadic("merge", merge) }
 inventory::submit! { Builtin::variadic("deep-merge", deep_merge) }
 inventory::submit! { Builtin::new("contains?", 2, 2, contains_q) }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.
 
 #[cfg(test)]
 mod tests {

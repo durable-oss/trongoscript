@@ -175,4 +175,4 @@ inventory::submit! { Builtin::new("ends-with?",    2, 2, ends_with) }
 inventory::submit! { Builtin::new("contains-str?", 2, 2, contains_str) }
 inventory::submit! { Builtin::new("substr",        2, 3, substr) }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

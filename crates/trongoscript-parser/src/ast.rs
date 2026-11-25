@@ -141,4 +141,4 @@ pub enum TemplateChunk {
     Silent(Vec<Expr>),
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

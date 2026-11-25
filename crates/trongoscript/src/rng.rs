@@ -244,4 +244,4 @@ fn call_set_seed(args: &[Expr], ctx: &mut Context) -> EvalResult<Value> {
     Ok(Value::Null)
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

@@ -96,4 +96,4 @@ inventory::submit! { Builtin::new("list?",        1, 1, list_q) }
 inventory::submit! { Builtin::new("map?",         1, 1, map_q) }
 inventory::submit! { Builtin::new("empty?",       1, 1, empty_q) }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

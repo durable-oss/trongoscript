@@ -200,4 +200,4 @@ inventory::submit! { Builtin::in_module_variadic(MODULE, "npv", npv) }
 inventory::submit! { Builtin::in_module(MODULE, "nper", 3, 5, nper) }
 inventory::submit! { Builtin::in_module(MODULE, "rate", 3, 6, rate) }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

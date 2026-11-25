@@ -241,4 +241,4 @@ fn scalars_interpolate_as_their_source_spelling() {
     assert_eq!(eval_str(r##""nil=#{nil}""##), s("nil="));
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

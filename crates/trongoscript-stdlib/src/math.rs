@@ -307,4 +307,4 @@ inventory::submit! { Builtin::in_module(MODULE, "e",           0, 0, e_const) }
 inventory::submit! { Builtin::in_module(MODULE, "parse-int",   1, 1, parse_int) }
 inventory::submit! { Builtin::in_module(MODULE, "parse-float", 1, 1, parse_float) }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

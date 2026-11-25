@@ -367,4 +367,4 @@ fn malformed_patterns_error() {
     .is_err());
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

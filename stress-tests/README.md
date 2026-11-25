@@ -288,4 +288,4 @@ first and you only care that *something* stopped it cleanly. Reach for
 is the point of the test — a test that accepts any error will keep passing
 after the guard it covers is removed.
 
-Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+Copyright (c) 2026 Durable Programming, LLC.

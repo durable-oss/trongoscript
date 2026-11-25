@@ -835,4 +835,4 @@ fn check_value_len_bounded(v: &Value, max_len: usize, budget: &mut u32) -> EvalR
     }
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

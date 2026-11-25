@@ -1495,4 +1495,4 @@ fn a_config_document_using_every_new_form() {
     assert_eq!(round_trip(&v), v);
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

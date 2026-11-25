@@ -860,4 +860,4 @@ fn set_op(arg_exprs: &[Expr], ctx: &mut Context, fname: &str, op: SetOp) -> Eval
     Ok(Value::Array(out))
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

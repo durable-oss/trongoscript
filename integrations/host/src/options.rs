@@ -203,4 +203,4 @@ fn to_usize(key: &str, v: u64) -> Result<usize, HostError> {
     usize::try_from(v).map_err(|_| HostError::argument(format!("{key} is too large: {v}")))
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

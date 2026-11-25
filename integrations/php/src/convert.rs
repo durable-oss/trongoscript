@@ -374,4 +374,4 @@ pub fn numeric_key(s: &str) -> Option<i64> {
     s.parse().ok()
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

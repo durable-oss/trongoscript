@@ -293,4 +293,4 @@ fn every_sugar_equals_its_desugaring() {
     }
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

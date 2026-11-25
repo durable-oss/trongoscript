@@ -55,4 +55,4 @@ pub fn all_module_names() -> Vec<&'static str> {
     out
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

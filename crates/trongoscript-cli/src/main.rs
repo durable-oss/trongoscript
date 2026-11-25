@@ -700,4 +700,4 @@ fn print_help() {
     print!("{HELP}");
 }
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

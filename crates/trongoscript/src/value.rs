@@ -56,4 +56,4 @@ pub fn is_function(v: &Value) -> bool {
 // `trongoscript-stdlib`, the single source of truth shared by all builtins.
 pub use trongoscript_stdlib::num_from_f64;
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.

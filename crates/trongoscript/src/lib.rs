@@ -90,4 +90,4 @@ pub use trongoscript_stdlib::{Builtin, BuiltinError, BuiltinResult, Value};
 pub use value::{fn_handle, is_function, make_fn_value};
 pub use vfs::{DirEntry, FileMeta, FileStore, MemoryFs, RealFs, MEMORY_FS_ROOT};
 
-// Copyright (c) 2026 Durable Programming, LLC. All rights reserved.
+// Copyright (c) 2026 Durable Programming, LLC.
