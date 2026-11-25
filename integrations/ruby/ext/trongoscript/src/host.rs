@@ -109,17 +109,27 @@ impl Host for RubyHost<'_> {
     fn wait(&mut self, events: &Events) -> Event {
         let mut declined = 0;
         loop {
-            if self.interrupt.is_some() || declined > 1 {
-                // Waiting with the GVL held: once interrupted, because the
-                // evaluator stops promptly when callbacks are refused (and
-                // fuel bounds it regardless); and if Ruby keeps declining
-                // to let this thread block, rather than spin.
+            if self.interrupt.is_some() {
+                // Waiting with the GVL held, because the evaluator stops
+                // promptly when callbacks are refused (and fuel bounds it
+                // regardless).
                 return events.recv();
             }
-            if let Some(event) = events.recv_timeout(HOLD_GVL) {
-                return event;
-            }
-            match wait_without_gvl(events) {
+            let event = if declined > 1 {
+                // Ruby keeps declining to let this thread block: wait with
+                // the GVL held rather than spin.
+                Some(events.recv())
+            } else {
+                events
+                    .recv_timeout(HOLD_GVL)
+                    .or_else(|| wait_without_gvl(events))
+            };
+            match event {
+                // A wake only means Ruby wanted this thread's attention;
+                // whether that was a real interrupt is decided below. It is
+                // never passed on: `unblock` can run after the wait above has
+                // already received an event, leaving a stale wake queued
+                // that a later wait would otherwise mistake for an interrupt.
                 Some(Event::Wake) | None => {}
                 Some(event) => return event,
             }

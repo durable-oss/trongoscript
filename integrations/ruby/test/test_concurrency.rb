@@ -64,9 +64,16 @@ class TestConcurrency < Minitest::Test
     ctx = Trongoscript::Context.new
     ctx.define("tick") { |x| x + 1 }
     worker = Thread.new { ctx.eval("(reduce (fn [a x] (tick a)) 0 (range 20000))") }
-    20.times do
-      worker.wakeup if worker.alive?
-      sleep 0.005
+    # Waking as often as possible lands some wakeups just after a wait has
+    # already received a callback, which used to leave a stale wake behind
+    # that a later wait took for an interrupt.
+    while worker.alive?
+      begin
+        worker.wakeup
+      rescue ThreadError
+        break # the worker finished between the check and the wakeup
+      end
+      Thread.pass
     end
     assert_equal 20_000, worker.value
   end
