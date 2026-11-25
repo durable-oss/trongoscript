@@ -1,0 +1,6 @@
+# Builds from this checkout use the in-repo host crate instead of the
+# release on crates.io. Cargo finds this file because rb_sys runs it from
+# tmp/ below this directory. The gemspec leaves it out, so an installed gem
+# resolves `trongoscript-host` from crates.io.
+[patch.crates-io]
+trongoscript-host = { path = "../host" }

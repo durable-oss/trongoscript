@@ -22,6 +22,7 @@ Gem::Specification.new do |spec|
     "homepage_uri" => spec.homepage,
     "source_code_uri" => "#{spec.homepage}/tree/main/integrations/ruby",
     "changelog_uri" => "#{spec.homepage}/blob/main/integrations/ruby/CHANGELOG.md",
+    "bug_tracker_uri" => "#{spec.homepage}/issues",
     "rubygems_mfa_required" => "true"
   }
 
@@ -30,7 +31,9 @@ Gem::Specification.new do |spec|
     "ext/trongoscript/{Cargo.toml,Cargo.lock,extconf.rb}",
     "ext/trongoscript/src/**/*.rs",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE-APACHE",
+    "LICENSE-MIT"
   ]
   spec.require_paths = ["lib"]
   spec.extensions = ["ext/trongoscript/extconf.rb"]

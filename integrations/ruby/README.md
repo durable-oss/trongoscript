@@ -128,10 +128,13 @@ The shared Rust layer the extension is built on lives in
 
 ### Packaging
 
-`ext/trongoscript/Cargo.toml` depends on the core crates by path, so a gem
-built with `gem build` is not yet self-contained: installing it needs this
-repository checked out next to it. Publishing requires vendoring those
-crates into the gem, or publishing them to crates.io first.
+The extension depends on the `trongoscript-host` crate from crates.io, so
+an installed gem builds without this repository. Inside the checkout,
+`.cargo/config.toml` patches that dependency to `../host`, so local builds
+pick up changes to the host crate and the core crates it depends on.
+
+A release of the gem needs a release of `trongoscript-host` that matches the
+version in `ext/trongoscript/Cargo.toml` to be on crates.io first.
 
 ## License
 

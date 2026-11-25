@@ -61,3 +61,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo publish --workspace --dry-run --locked
+
+  # The Ruby gem is excluded from the Cargo workspace, so it needs its own
+  # job. Building from the checkout uses integrations/ruby/.cargo/config.toml,
+  # which points the extension at the in-repo host crate.
+  ruby:
+    name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        ruby: ["3.1", "3.2", "3.3", "3.4"]
+    defaults:
+      run:
+        working-directory: integrations/ruby
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oxidize-rb/actions/setup-ruby-and-rust@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          cargo-cache: true
+          working-directory: integrations/ruby
+      - run: bundle exec rake compile test
+      - run: gem build trongoscript.gemspec
