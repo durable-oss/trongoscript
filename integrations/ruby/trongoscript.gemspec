@@ -6,7 +6,7 @@ Gem::Specification.new do |spec|
   spec.name = "trongoscript"
   spec.version = Trongoscript::VERSION
   spec.authors = ["Durable Programming LLC"]
-  spec.email = ["commercial@durableprogramming.com"]
+  spec.email = ["oss@durableprogramming.com"]
 
   spec.summary = "Ruby bindings for Trongoscript, a small Lisp for building configuration data"
   spec.description = <<~DESC

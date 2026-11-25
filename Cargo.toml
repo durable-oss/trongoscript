@@ -18,7 +18,7 @@ exclude = [
 [workspace.package]
 version = "0.1.1"
 edition = "2021"
-authors = ["Durable Programming <hello@durableprogramming.com>"]
+authors = ["Durable Programming <oss@durableprogramming.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/durable-oss/trongoscript"
 description = "A YAMLScript-inspired DSL for producing nested data structures, written in Rust"
