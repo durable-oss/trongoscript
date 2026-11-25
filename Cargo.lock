@@ -372,7 +372,7 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "trongoscript"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "inventory",
  "pretty_assertions",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "trongoscript-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "trongoscript-host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "pretty_assertions",
  "serde_json",
@@ -409,7 +409,7 @@ dependencies = [
 
 [[package]]
 name = "trongoscript-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "nom",
  "pretty_assertions",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "trongoscript-stdlib"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "inventory",
  "pretty_assertions",

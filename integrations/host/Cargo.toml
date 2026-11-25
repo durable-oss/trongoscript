@@ -6,7 +6,6 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Shared embedding layer for the Trongoscript Ruby and PHP bindings"
-publish = false
 
 [dependencies]
 trongoscript.workspace = true
